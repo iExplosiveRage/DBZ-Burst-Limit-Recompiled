@@ -28,6 +28,8 @@
 
 // burstlimit_online.cpp: online stall counter, every game tick.
 void BurstLimitOnlineFrame(rex::memory::Memory* memory);
+// burstlimit_buttons.cpp: the button icons follow the setting / controller.
+void BurstLimitButtonsFrame(rex::memory::Memory* memory);
 
 REXCVAR_DEFINE_BOOL(free_camera, false, "Patches",
                     "Free camera for screenshots: left stick moves, right stick looks, LB/RB "
@@ -527,6 +529,7 @@ void BurstLimitCameraFrame(PPCRegister& r30) {
   ApplyFreeze(memory);
   UpdateFreeCamera(memory);
   BurstLimitOnlineFrame(memory);
+  BurstLimitButtonsFrame(memory);
   // After the update, so it shows a pose free_camera_pose has just posted.
   if (g_where_requested.exchange(false)) {
     LogFreeCameraWhere(memory);

@@ -64,6 +64,10 @@ REXCVAR_DEFINE_BOOL(story_costumes, true, "Patches",
                     "Goku battle-damaged and as Ginyu, Kid Gohan's Raditz-saga outfit, Teen "
                     "Gohan battle-damaged");
 
+// burstlimit_buttons.cpp: the button icons of the controller in use.
+int BurstLimitButtonStyle();
+bool BurstLimitRestyleWindowIcon(int index, int style, BurstLimitTexture& image);
+
 namespace {
 
 constexpr uint32_t kRequestCharacter = 0x0;
@@ -286,6 +290,7 @@ class StartFormTags : public rex::ui::ImGuiDialog {
       return;
     }
     LoadArt();
+    RefreshButton();
     // ImGui is linked into both the runtime and this exe; draw in the
     // runtime's context (the one being drawn), not this copy's empty one.
     ImGui::SetCurrentContext(io.Ctx);
@@ -416,8 +421,22 @@ class StartFormTags : public rex::ui::ImGuiDialog {
       }
     }
     button_ = MakeTexture(decoded_button_);
+    button_style_ = -1;
     decoded_font_ = {};
-    decoded_button_ = {};
+  }
+
+  // RB in the button_icons style (R1, R...); decoded_button_ is the game's.
+  void RefreshButton() {
+    const int style = BurstLimitButtonStyle();
+    if (!art_uploaded_ || style == button_style_ || decoded_button_.rgba.empty()) {
+      return;
+    }
+    button_style_ = style;
+    BurstLimitTexture image = decoded_button_;
+    BurstLimitRestyleWindowIcon(kButtonRBTexture, style, image);
+    if (auto texture = MakeTexture(image)) {
+      button_ = std::move(texture);
+    }
   }
 
   // Text in the game's font, `cell` tall (the font's glyph cells); returns its
@@ -531,6 +550,7 @@ class StartFormTags : public rex::ui::ImGuiDialog {
   std::array<std::vector<std::unique_ptr<rex::ui::ImmediateTexture>>, kCharacterCount> faces_;
   std::unique_ptr<rex::ui::ImmediateTexture> font_;
   std::unique_ptr<rex::ui::ImmediateTexture> button_;
+  int button_style_ = -1;  // the button_icons style button_ shows (-1: the game's)
   std::array<Glyph, 128> glyphs_{};
 };
 

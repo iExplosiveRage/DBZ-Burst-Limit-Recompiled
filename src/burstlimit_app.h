@@ -1,7 +1,9 @@
 #pragma once
 
 #include <filesystem>
+#include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -14,13 +16,33 @@
 
 // burstlimit_patches.cpp
 void BurstLimitApplyPostEffectSettings();
+// burstlimit_branding.cpp
+void BurstLimitBrandingSetup(const std::filesystem::path& game_data_root);
+// burstlimit_buttons.cpp
+void BurstLimitButtonsSetup(const std::filesystem::path& game_data_root);
 // burstlimit_online.cpp
 void BurstLimitOnlineSetup();
+// burstlimit_saves.cpp
+void BurstLimitSavesSetup(const std::filesystem::path& exe_directory,
+                          const std::filesystem::path& user_data_root);
+void BurstLimitSavesMenu(rex::ui::QuickMenuConfig& menu);
 std::unique_ptr<rex::ui::ImGuiDialog> BurstLimitCreateOnlineNotice(rex::ui::ImGuiDrawer* drawer);
 // burstlimit_forms.cpp
 std::unique_ptr<rex::ui::ImGuiDialog> BurstLimitCreateStartFormTags(
     rex::ui::ImGuiDrawer* drawer, rex::ui::ImmediateDrawer* immediate_drawer,
     const std::filesystem::path& game_data_root);
+// burstlimit_mods.cpp
+void BurstLimitModsSetup(const std::filesystem::path& exe_directory,
+                         const std::filesystem::path& game_data_root);
+std::unique_ptr<rex::ui::ImGuiDialog> BurstLimitCreateModsPanel(
+    rex::ui::ImGuiDrawer* drawer, rex::ui::ImmediateDrawer* immediate_drawer,
+    const std::filesystem::path& game_data_root,
+    std::function<void(std::function<void()>)> defer);
+// burstlimit_install.cpp
+std::unique_ptr<rex::ui::ImGuiDialog> BurstLimitCreateInstaller(
+    rex::ui::ImGuiDrawer* drawer, const std::filesystem::path& target,
+    std::function<void(std::filesystem::path)> done,
+    std::function<void(std::function<void()>)> defer);
 
 class BurstlimitApp : public rex::ReXApp {
  public:
@@ -39,7 +61,16 @@ class BurstlimitApp : public rex::ReXApp {
       config.gpu_plugin = "xenos";
     }
     BurstLimitApplyPostEffectSettings();
+    // Before the game's files are mounted (the mods change what the guest
+    // reads) and before the online version string is made (it names them).
+    BurstLimitModsSetup(ExeDirectory(), game_data_root());
     BurstLimitOnlineSetup();
+    // "Online" instead of "Xbox LIVE": the title art is made in the background.
+    BurstLimitBrandingSetup(game_data_root());
+    // The button icons of the controller in use (PlayStation / Switch).
+    BurstLimitButtonsSetup(game_data_root());
+    // Save export / import in the settings menu.
+    BurstLimitSavesSetup(ExeDirectory(), user_data_root());
   }
 
   // The start form tags of the character select (burstlimit_forms.cpp), and
@@ -47,6 +78,11 @@ class BurstlimitApp : public rex::ReXApp {
   void OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) override {
     start_form_tags_ = BurstLimitCreateStartFormTags(drawer, immediate_drawer(), game_data_root());
     online_notice_ = BurstLimitCreateOnlineNotice(drawer);
+    mods_panel_ = BurstLimitCreateModsPanel(
+        drawer, immediate_drawer(), game_data_root(),
+        [this](std::function<void()> function) {
+          app_context().CallInUIThreadDeferred(std::move(function));
+        });
     rex::ui::RegisterBind("bind_free_camera", "Insert", "Free camera on/off", [] {
       rex::cvar::SetFlagByName(
           "free_camera", rex::cvar::Query<bool>("free_camera") ? "false" : "true");
@@ -57,11 +93,34 @@ class BurstlimitApp : public rex::ReXApp {
     });
   }
 
+  // No game files yet (first start): ask for the disc image and copy its
+  // files next to the exe (burstlimit_install.cpp), then start.
+  std::optional<rex::PathConfig> OnFinalizePaths(
+      const rex::PathConfig& defaults, std::function<void(rex::PathConfig)> resume) override {
+    if (!defaults.game_data_root.empty() || !imgui_drawer()) {
+      return defaults;
+    }
+    installer_ = BurstLimitCreateInstaller(
+        imgui_drawer(), ExeDirectory() / L"game_data_root",
+        [this, defaults, resume](std::filesystem::path root) {
+          rex::PathConfig paths = defaults;
+          paths.game_data_root = std::move(root);
+          installer_.reset();
+          resume(paths);
+        },
+        [this](std::function<void()> function) {
+          app_context().CallInUIThreadDeferred(std::move(function));
+        });
+    return std::nullopt;
+  }
+
   void OnShutdown() override {
     rex::ui::UnregisterBind("bind_free_camera");
     rex::ui::UnregisterBind("bind_freeze_game");
     start_form_tags_.reset();
     online_notice_.reset();
+    mods_panel_.reset();
+    installer_.reset();
   }
 
   // The settings menu (F1 or Back + Start on the controller).
@@ -273,6 +332,18 @@ class BurstlimitApp : public rex::ReXApp {
     // Only matters when no lobby input delay is picked (Radmin / LAN, or Game default).
     online.shown_if_cvar = "online_input_delay";
     online.shown_if_values = {"off"};
+    game.items.push_back(toggle(
+        "Ki charge (hold L3)", "ki_charge",
+        "Hold L3 (press the left stick) in a fight to power up and fill the Ki gauge faster, "
+        "like in Shin Budokai - on the ground or in the air. Let go, get hit or fill the gauge "
+        "to stop. Online, the host's setting is used."));
+    Item& ki_speed = game.items.emplace_back(choice(
+        "Ki charge speed", "ki_charge_rate",
+        {{"10", "Slow"}, {"16", "Normal"}, {"25", "Fast"}},
+        "How fast holding L3 fills the Ki gauge (Normal: an empty gauge in about 2.4 s). "
+        "Online, the host's setting is used."));
+    ki_speed.shown_if_cvar = "ki_charge";
+    ki_speed.shown_if_values = {"true"};
     game.items.push_back(toggle("Vibration", "vibration", "Controller vibration."));
     game.items.push_back(toggle(
         "Free camera", "free_camera",
@@ -308,9 +379,30 @@ class BurstlimitApp : public rex::ReXApp {
     fps_position.shown_if_cvar = "debug_overlay";
     fps_position.shown_if_values = {"true"};
     display.items.push_back(choice(
+        "Button icons", "button_icons",
+        {{"auto", "Auto"},
+         {"xbox", "Xbox"},
+         {"playstation", "PlayStation"},
+         {"switch", "Nintendo Switch"}},
+        "Which controller's buttons the game shows in its prompts, tutorials and fight HUD (and "
+        "this menu). Auto follows the controller in use (Xbox for the keyboard or an unknown "
+        "pad). Applies right away."));
+    display.items.push_back(choice(
         "Menu buttons", "quick_menu_buttons",
         {{"back+start", "Back + Start"}, {"l3+r3", "L3 + R3"}, {"none", "Keyboard only"}},
         "Controller buttons that open this menu. F1 on the keyboard always does."));
+
+    // Export / import of the save (burstlimit_saves.cpp).
+    BurstLimitSavesMenu(menu);
+  }
+
+  static std::filesystem::path ExeDirectory() {
+    wchar_t exe_path[MAX_PATH] = {};
+    const DWORD length = GetModuleFileNameW(nullptr, exe_path, MAX_PATH);
+    if (length == 0 || length >= MAX_PATH) {
+      return std::filesystem::current_path();
+    }
+    return std::filesystem::path(exe_path).parent_path();
   }
 
   // Portable build: always load game files beside burstlimit.exe.
@@ -337,4 +429,6 @@ class BurstlimitApp : public rex::ReXApp {
  private:
   std::unique_ptr<rex::ui::ImGuiDialog> start_form_tags_;
   std::unique_ptr<rex::ui::ImGuiDialog> online_notice_;
+  std::unique_ptr<rex::ui::ImGuiDialog> mods_panel_;
+  std::unique_ptr<rex::ui::ImGuiDialog> installer_;
 };

@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstring>
 #include <fstream>
 #include <string>
@@ -523,7 +524,8 @@ bool BurstLimitParseNfh(const std::vector<uint8_t>& nfh, std::vector<BurstLimitG
   // "NFH", the glyph count at 8, then from 0x450 an entry of 32 bytes per
   // glyph: atlas x and y at +4, the visible glyph's start (negated) and end in
   // the cell at +8 and +12 (signed, 1/64 pixel), cell size at +20 and the
-  // character at +22.
+  // character at +22. Fonts with tight boxes (FUCHINASHI) have the bearing at
+  // +8, the top above the baseline at +10 and the advance at +12.
   constexpr size_t kGlyphs = 0x450;
   constexpr size_t kGlyphSize = 32;
   if (nfh.size() < kGlyphs || std::memcmp(nfh.data(), "NFH", 3) != 0) {
@@ -537,6 +539,7 @@ bool BurstLimitParseNfh(const std::vector<uint8_t>& nfh, std::vector<BurstLimitG
     glyph.y = Be16(entry + 6);
     glyph.left = -float(int16_t(Be16(entry + 8))) / 64.0f;
     glyph.right = float(int16_t(Be16(entry + 12))) / 64.0f;
+    glyph.top = float(int16_t(Be16(entry + 10))) / 64.0f;
     glyph.width = entry[20];
     glyph.height = entry[21];
     glyph.code = Be16(entry + 22);
@@ -545,3 +548,152 @@ bool BurstLimitParseNfh(const std::vector<uint8_t>& nfh, std::vector<BurstLimitG
   return !glyphs.empty();
 }
 
+static uint16_t To565(const float c[3]) {
+  const int r = std::clamp(int(std::lround(c[0] * 31.0f / 255.0f)), 0, 31);
+  const int g = std::clamp(int(std::lround(c[1] * 63.0f / 255.0f)), 0, 63);
+  const int b = std::clamp(int(std::lround(c[2] * 31.0f / 255.0f)), 0, 31);
+  return uint16_t(r << 11 | g << 5 | b);
+}
+
+static void From565(uint16_t v, float c[3]) {
+  c[0] = float((v >> 11) & 31) * 255.0f / 31.0f;
+  c[1] = float((v >> 5) & 63) * 255.0f / 63.0f;
+  c[2] = float(v & 31) * 255.0f / 31.0f;
+}
+
+void BurstLimitEncodeDxt5Block(const uint8_t pixels[16][4], uint8_t block[16]) {
+  // Alpha: 8-value mode between the block's extremes.
+  uint8_t a_min = 255, a_max = 0;
+  for (int i = 0; i < 16; ++i) {
+    a_min = std::min(a_min, pixels[i][3]);
+    a_max = std::max(a_max, pixels[i][3]);
+  }
+  block[0] = a_max;
+  block[1] = a_min;
+  uint64_t alpha_bits = 0;
+  if (a_max > a_min) {
+    float palette[8];
+    palette[0] = a_max;
+    palette[1] = a_min;
+    for (int k = 1; k <= 6; ++k) {
+      palette[k + 1] = float((7 - k) * a_max + k * a_min) / 7.0f;
+    }
+    for (int i = 0; i < 16; ++i) {
+      int best = 0;
+      float best_error = 1e9f;
+      for (int k = 0; k < 8; ++k) {
+        const float error = std::fabs(palette[k] - pixels[i][3]);
+        if (error < best_error) {
+          best_error = error;
+          best = k;
+        }
+      }
+      alpha_bits |= uint64_t(best) << (3 * i);
+    }
+  }
+  for (int k = 0; k < 6; ++k) {
+    block[2 + k] = uint8_t(alpha_bits >> (8 * k));
+  }
+
+  // Color: the endpoints on the main axis of the visible pixels' colors.
+  float mean[3] = {0, 0, 0};
+  int count = 0;
+  for (int i = 0; i < 16; ++i) {
+    if (pixels[i][3] >= 8) {
+      for (int c = 0; c < 3; ++c) {
+        mean[c] += pixels[i][c];
+      }
+      ++count;
+    }
+  }
+  const bool use_all = count == 0;
+  if (use_all) {
+    for (int i = 0; i < 16; ++i) {
+      for (int c = 0; c < 3; ++c) {
+        mean[c] += pixels[i][c];
+      }
+    }
+    count = 16;
+  }
+  for (float& m : mean) {
+    m /= float(count);
+  }
+  float cov[6] = {0, 0, 0, 0, 0, 0};
+  for (int i = 0; i < 16; ++i) {
+    if (!use_all && pixels[i][3] < 8) {
+      continue;
+    }
+    const float d[3] = {pixels[i][0] - mean[0], pixels[i][1] - mean[1], pixels[i][2] - mean[2]};
+    cov[0] += d[0] * d[0];
+    cov[1] += d[0] * d[1];
+    cov[2] += d[0] * d[2];
+    cov[3] += d[1] * d[1];
+    cov[4] += d[1] * d[2];
+    cov[5] += d[2] * d[2];
+  }
+  float axis[3] = {0.577f, 0.577f, 0.577f};
+  for (int iteration = 0; iteration < 8; ++iteration) {
+    const float next[3] = {cov[0] * axis[0] + cov[1] * axis[1] + cov[2] * axis[2],
+                           cov[1] * axis[0] + cov[3] * axis[1] + cov[4] * axis[2],
+                           cov[2] * axis[0] + cov[4] * axis[1] + cov[5] * axis[2]};
+    const float length = std::sqrt(next[0] * next[0] + next[1] * next[1] + next[2] * next[2]);
+    if (length < 1e-6f) {
+      break;
+    }
+    for (int c = 0; c < 3; ++c) {
+      axis[c] = next[c] / length;
+    }
+  }
+  float t_min = 1e9f, t_max = -1e9f;
+  for (int i = 0; i < 16; ++i) {
+    if (!use_all && pixels[i][3] < 8) {
+      continue;
+    }
+    const float t = (pixels[i][0] - mean[0]) * axis[0] + (pixels[i][1] - mean[1]) * axis[1] +
+                    (pixels[i][2] - mean[2]) * axis[2];
+    t_min = std::min(t_min, t);
+    t_max = std::max(t_max, t);
+  }
+  float e0[3], e1[3];
+  for (int c = 0; c < 3; ++c) {
+    e0[c] = std::clamp(mean[c] + axis[c] * t_max, 0.0f, 255.0f);
+    e1[c] = std::clamp(mean[c] + axis[c] * t_min, 0.0f, 255.0f);
+  }
+  uint16_t c0 = To565(e0), c1 = To565(e1);
+  if (c0 < c1) {
+    std::swap(c0, c1);
+  }
+  float palette[4][3];
+  From565(c0, palette[0]);
+  From565(c1, palette[1]);
+  for (int c = 0; c < 3; ++c) {
+    palette[2][c] = (2.0f * palette[0][c] + palette[1][c]) / 3.0f;
+    palette[3][c] = (palette[0][c] + 2.0f * palette[1][c]) / 3.0f;
+  }
+  uint32_t color_bits = 0;
+  if (c0 != c1) {
+    for (int i = 0; i < 16; ++i) {
+      int best = 0;
+      float best_error = 1e9f;
+      for (int k = 0; k < 4; ++k) {
+        float error = 0.0f;
+        for (int c = 0; c < 3; ++c) {
+          const float d = palette[k][c] - pixels[i][c];
+          error += d * d;
+        }
+        if (error < best_error) {
+          best_error = error;
+          best = k;
+        }
+      }
+      color_bits |= uint32_t(best) << (2 * i);
+    }
+  }
+  block[8] = uint8_t(c0);
+  block[9] = uint8_t(c0 >> 8);
+  block[10] = uint8_t(c1);
+  block[11] = uint8_t(c1 >> 8);
+  for (int k = 0; k < 4; ++k) {
+    block[12 + k] = uint8_t(color_bits >> (8 * k));
+  }
+}

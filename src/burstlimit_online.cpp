@@ -133,17 +133,36 @@ class OnlineNotice final : public rex::ui::ImGuiDialog {
 
 }  // namespace
 
-// At startup (OnPreSetup): what the lobby layer needs from the game.
+// burstlimit_mods.cpp: "" without mods, else "mods.<hash of the files in use>".
+std::string BurstLimitModsOnlineTag();
+
+// The version string the lobby matches rooms by. Players with different mods
+// would desync (other models, moves, stages), so the mods in use are part of
+// it: rooms only match between identical mod sets (`mods`: "" or the mods'
+// tag). Without mods the version is the build's alone. Called at startup and
+// when the mods change.
+void BurstLimitOnlineUpdateVersion(const std::string& mods) {
+  std::string version = "burstlimit-" BURSTLIMIT_VERSION;
+  if (!mods.empty()) {
+    version += "+" + mods;
+  }
+  rex::net::online::SetGameVersion(version);
+  REXLOG_INFO("Online: version {}", version);
+}
+
+// At startup (OnPreSetup, after BurstLimitModsSetup): what the lobby layer
+// needs from the game.
 void BurstLimitOnlineSetup() {
-  rex::net::online::SetGameVersion("burstlimit-" BURSTLIMIT_VERSION);
+  BurstLimitOnlineUpdateVersion(BurstLimitModsOnlineTag());
   // A different frame driver step on the two PCs is a desync (the battle runs
   // step + 1 frames per input frame), so the guest takes the host's values.
   // The input delay and the per-frame input channel change what the driver
   // does with each frame, so they're shared the same way.
+  // The Ki charge (burstlimit_kicharge.cpp) runs inside the battle, so its
+  // settings must match too.
   rex::net::online::SetSyncedCvars({"online_tick_sleep", "online_fast_tick", "online_input_delay",
-                                    "online_input_channel"});
+                                    "online_input_channel", "ki_charge", "ki_charge_rate"});
   BurstLimitNetInputSetup();
-  REXLOG_INFO("Online: version burstlimit-{}", BURSTLIMIT_VERSION);
 }
 
 std::unique_ptr<rex::ui::ImGuiDialog> BurstLimitCreateOnlineNotice(rex::ui::ImGuiDrawer* drawer) {

@@ -313,3 +313,117 @@ address = 0x82179E00
 name = "BurstLimitOnlineFightStartFrame"
 registers = ["r3", "cr6"]
 after_instruction = true
+
+# --- Mods menu (src/burstlimit_mods.cpp) ---
+# A "Mods" entry after Options in the main menu; A on it opens the Mods panel.
+
+# sub_8224F690 (main menu list made, r30 = the list with its 6 items), li r4,120
+# before it's measured: add "Mods" by running the last add (bl sub_82288A70 at
+# 0x8224F7AC, r3 = list, r4 = text) once more.
+[[entrypoint.midasm_hook]]
+address = 0x8224F7B0
+name = "BurstLimitModsMenuAddItem"
+registers = ["r3", "r4", "r30"]
+jump_address_on_true = 0x8224F7AC
+
+# sub_82251108 (main menu), the cursor moved (r30 = item): the art behind the
+# list comes from 6-entry tables - Mods keeps Options' art.
+[[entrypoint.midasm_hook]]
+address = 0x82251278
+name = "BurstLimitModsMenuArtCursor"
+registers = ["r30"]
+
+# sub_82251108, cmplwi cr6,r3,5 (descriptions only for items 0-5): Mods' own.
+[[entrypoint.midasm_hook]]
+address = 0x82251794
+name = "BurstLimitModsMenuHelpIndex"
+registers = ["r3", "r30"]
+jump_address_on_true = 0x822517B4
+
+# sub_82251108, bl sub_822803E0 (the description's text by id r30).
+[[entrypoint.midasm_hook]]
+address = 0x822517C8
+name = "BurstLimitModsMenuHelpText"
+registers = ["r3", "r30"]
+jump_address_on_true = 0x822517CC
+
+# sub_8228DDA0 (a list's input), beq when the confirm button isn't pressed
+# (r31 = the list): A on Mods opens the Mods panel instead of confirming.
+[[entrypoint.midasm_hook]]
+address = 0x8228E8DC
+name = "BurstLimitModsMenuConfirm"
+registers = ["cr6", "r31"]
+
+# sub_82251108 (main menu, every frame), mr r3,r27 right after its own optional
+# bl sub_8210C198 (menu sound): the Mods panel's sounds run that call again.
+[[entrypoint.midasm_hook]]
+address = 0x82251620
+name = "BurstLimitModsMenuSound"
+registers = ["r3", "r4", "r6", "f1"]
+jump_address_on_true = 0x8225161C
+
+# Ki charge (src/burstlimit_kicharge.cpp). sub_821721D8 (local input task),
+# b 0x82172364 after sub_821706B0 built the controller's command word (r31+64),
+# only when input isn't locked: L3 (without R3) goes into bit 31.
+[[entrypoint.midasm_hook]]
+address = 0x82172340
+name = "BurstLimitKiChargeInput"
+registers = ["r31"]
+
+# sub_82172A30 (a fighter's command step in the battle, r21 = fighter), addi
+# r4,r1,80 right after bl sub_8217E060 read the consumed command word into
+# r1+80: start / keep / end the charge.
+[[entrypoint.midasm_hook]]
+address = 0x82172AA4
+name = "BurstLimitKiChargeCommand"
+registers = ["r1", "r21", "r31"]
+
+# sub_821A1260 (action lookup, r31 = fighter), cmplwi cr6,r8,0 after the
+# search: the charge's action ids get their records.
+[[entrypoint.midasm_hook]]
+address = 0x821A135C
+name = "BurstLimitKiChargeAction"
+registers = ["r6", "r8", "r11", "r31"]
+
+# sub_82145E98 (the auras, drawing; r29 = player, r30 = fighter, r31 = aura
+# state), lwz r11,64(r31) after the strength +40 is worked out: full strength
+# while charging Ki.
+[[entrypoint.midasm_hook]]
+address = 0x821460F0
+name = "BurstLimitKiChargeAura"
+registers = ["r29", "r30", "r31"]
+
+# --- "Online" instead of "Xbox LIVE" (src/burstlimit_branding.cpp) ---
+
+# sub_8228F6A0 (a screen's text by index, via sub_822803E0), its blr: r3 = the
+# text; texts with "Xbox LIVE" get an "Online" copy.
+[[entrypoint.midasm_hook]]
+address = 0x8228F6D8
+name = "BurstLimitBrandingScreenText"
+registers = ["r3"]
+
+# sub_8228F5C0 (the common texts by id: Unlock / Kiyaku / MenuCommon), the blr
+# after a table's text: r3 = the text.
+[[entrypoint.midasm_hook]]
+address = 0x8228F664
+name = "BurstLimitBrandingCommonText"
+registers = ["r3"]
+
+# NTXR loader sub_820EB688, addi r3,r28,16 right before the stage thumbnails'
+# hook (same registers): the "Xbox LIVE BATTLE" title textures of UIVNT_TOP.NUT
+# become "ONLINE BATTLE".
+[[entrypoint.midasm_hook]]
+address = 0x820EB780
+name = "BurstLimitBrandingTexture"
+registers = ["r26", "r29", "r30"]
+
+# --- Button icons of the controller in use (src/burstlimit_buttons.cpp) ---
+# (The textures are redrawn from the 0x820EB780 hook above.)
+
+# sub_820F89F8 (fills a texture: memory at [r31 + 80], the NTXR header r28's
+# data tiled into it by sub_82512BC0), right after the tiling: where a redrawn
+# texture went, to redraw it in place when the setting changes.
+[[entrypoint.midasm_hook]]
+address = 0x820F8B54
+name = "BurstLimitButtonsTextureMade"
+registers = ["r28", "r31"]

@@ -50,6 +50,13 @@ struct BurstLimitGlyph {
   uint16_t height = 0;
   float left = 0.0f;
   float right = 0.0f;
+  // Tight-box fonts (FUCHINASHI): the glyph's top above the baseline.
+  float top = 0.0f;
 };
 
 bool BurstLimitParseNfh(const std::vector<uint8_t>& nfh, std::vector<BurstLimitGlyph>& glyphs);
+
+// One DXT5 block (the usual little-endian layout: alpha endpoints and indices, then
+// the color endpoints and indices) from 16 RGBA8 pixels, row by row. The NUT
+// files keep it as big-endian 16-bit words (swap each byte pair).
+void BurstLimitEncodeDxt5Block(const uint8_t pixels[16][4], uint8_t block[16]);

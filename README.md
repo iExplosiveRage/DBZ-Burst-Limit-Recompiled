@@ -20,6 +20,12 @@ normal Windows program instead of inside an emulator.
 ## Features
 
 - **Native x64 build** of the game code (no JIT), Direct3D 12 renderer.
+- **Install from your disc image**: on the first start without game files, pick your Burst Limit (USA) Xbox 360
+  `.iso` and the game files are copied next to `burstlimit.exe` (about 3.3 GB, once). The `.iso` is checked to be
+  the US version first and isn't changed. `--install_iso=<path>` does the same without the file picker.
+- **Faster rendering**: clears done in place instead of EDRAM transfers, no per-frame re-upload of untouched
+  memory, and the unclipped draws' extents worked out on the CPU - about **2x the FPS at native 4K** (100 -> 190+
+  on an RTX 4080) and +40 % with DLAA; +32 % on an AMD integrated GPU at 1080p.
 - **In-game settings menu**: **F1**, or **Back + Start** on the controller. Resolution, upscaler, frame rate,
   field of view, post effects, free camera and more; changes apply right away and are saved to `burstlimit.toml`.
 - **Frame rate cap** (`frame_rate`): 30 (the original), 60, 120, 144 or unlocked, with fixes for pause, quitting
@@ -36,7 +42,7 @@ normal Windows program instead of inside an emulator.
   on RTX GPUs, applied to the 3D scene before the HUD, with the jitter and camera motion vectors it needs
   reconstructed from the game's draws. **DLAA** keeps the chosen resolution; **Quality**, **Balanced**,
   **Performance** and **Ultra Performance** render the scene lower and upscale it, for more FPS, while the HUD
-  is still drawn at the full resolution. Fast moves can leave a faint trail.
+  is still drawn at the full resolution.
 - **Sharper picture** (`soft_filter`): the game's last pass blurs the whole picture slightly (a soft look made
   for 720p). Above 720p it took away much of the resolution's sharpness, so it's off by default now; turn it
   back on in Settings > Effects > Soft filter.
@@ -63,7 +69,25 @@ normal Windows program instead of inside an emulator.
   around (offline only). Keyboard: **Insert** and **Numpad 0**, both rebindable in the settings menu. For
   repeatable shots, the console commands `free_camera_where` (logs the current camera as a command) and
   `free_camera_pose <x> <y> <z> <yaw> <pitch> [fov] [roll]` (puts the camera there).
+- **Sharp Xbox Series, PlayStation and Nintendo Switch button icons** (`button_icons`): the game's small Xbox 360
+  button prompts - menus, tutorials
+  and the fight HUD's "press repeatedly" buttons, the settings and Mods menus - show the buttons of the
+  controller in use, by position (A = Cross / B, B = Circle / A, LB = L1 / L, ...), drawn at high resolution, and
+  the Xbox 360 pad of Control Settings and the tutorial becomes an Xbox Series controller, a DualSense or a pair
+  of Joy-Cons. **Auto**
+  follows the controller you play with; Settings > Display > Button icons picks one.
 - **FPS panel** (F3): frame rate, frame time graph, render resolution and upscaler, in any corner.
+- **Mods menu** (`mods_enabled`): a **Mods** entry in the main menu, under Options, in the game's own style and
+  sounds. A mod is a folder in `mods\` next to `burstlimit.exe` with replacement game files named like the files
+  in `LONG2DATA_US.CPK` (for example `BCGOK002.NUX`); PlayStation 3 model mods are converted on the fly. Switches
+  apply without restarting, from each file's next load. The game's archive itself is never changed. Online, rooms
+  only match players with the same mods on. See [Mods](#mods).
+- **Ki charge** (`ki_charge`, `ki_charge_rate`, off by default): hold **L3** to charge Ki, like Shin Budokai - on
+  the ground or in the air, with a finishing pose when the gauge is full, the Aura Spark motion and wind / dust in
+  your aura's color. Works online (the host's setting is used by both players).
+- **"Online" instead of "Xbox LIVE"** (`online_branding`): the menus' text and the **Online Battle** title.
+- **Save export / import** (Settings > Save): your save as a zip in the `saves` folder next to `burstlimit.exe`,
+  and back - also saves exported from Xenia. The current save is backed up first.
 - **Online over the internet, no VPN** (`online_lobby_url`): rooms appear in the game's own Player Match menus
   (Create Match / Custom Match), served by a small lobby server; the two PCs then connect directly (ICE with
   STUN hole punching, a TURN relay when that isn't possible). See [Online play](#online-play).
@@ -76,9 +100,10 @@ normal Windows program instead of inside an emulator.
   matches, emulated on top of plain UDP, with a configurable match driver step (`online_fast_tick`,
   `online_tick_sleep`): the game normally sends input in 12-frame batches (~1 second of input delay even on LAN).
 - **Texture dumping / replacement** (`texture_dump_enabled`, `texture_replace_enabled`): put a texture pack in
-  `textures\replace` and turn on **Texture pack** in the settings menu. Replacements get mipmaps and are decoded
-  in the background at startup, so they don't stutter the game when first used; packs bigger than
-  `texture_replace_ram_mb` load as they're used instead, and the least recently used ones leave RAM.
+  `textures\replace` and turn on **Texture pack** in the settings menu. PNG and DDS (BC1/BC2/BC3/**BC7** and
+  uncompressed) files are read. Replacements get mipmaps and are decoded in the background at startup (on several
+  threads), so they don't stutter the game when first used; packs bigger than `texture_replace_ram_mb` load as
+  they're used instead, and the least recently used ones leave RAM. Keep big packs on an SSD.
 - **Play time fix**: the game counts play time in presented frames, so above 60 FPS it ran fast; it counts real
   time now.
 - Optional **Discord Rich Presence**.
@@ -90,9 +115,11 @@ normal Windows program instead of inside an emulator.
 Grab the latest **alpha** from the [Releases page](https://github.com/iExplosiveRage/DBZ-Burst-Limit-Recompiled/releases):
 
 1. Download `DBZ-Burst-Limit-Recompiled-*.zip` and extract it anywhere.
-2. Copy your extracted game files (**US version**) into the `game_data_root` folder inside it (see
-   [Game files](#game-files)).
-3. Run `burstlimit.exe`.
+2. Run `burstlimit.exe`. The first time, it asks for your Burst Limit (**US version**) Xbox 360 `.iso` and
+   installs the game files from it. (Or copy your extracted game files into the `game_data_root` folder yourself,
+   see [Game files](#game-files).)
+
+<p align="center"><img src="res/screenshots/install.png" alt="First start: pick your .iso, the game files are installed" width="600"></p>
 
 Building from source (below) is only needed if you want to change the code.
 
@@ -101,7 +128,7 @@ Download `DBZ-Burst-Limit-Recompiled-*-linux.zip` instead: the same build with
 [vkd3d-proton](https://github.com/HansKristian-Work/vkd3d-proton) and [DXVK](https://github.com/doitsujin/dxvk)
 (Direct3D 12 to Vulkan) next to it and a `run_linux.sh` launcher for Wine. Put your game files in
 `game_data_root` and run `./run_linux.sh`. Steam / Proton works too: add `burstlimit.exe` as a non-Steam game
-and force Proton Experimental in its Compatibility settings.
+and force Proton Experimental in its Compatibility settings. The `.iso` install works there too.
 
 ---
 
@@ -149,7 +176,8 @@ codegen fixes).
 
 ## Game files
 
-Extract your copy of the game (for example with `extract-xiso`) and copy it into a folder called
+The released build installs them from your `.iso` on its first start (see [Download](#download-no-build-needed)).
+To do it by hand, or to build from source: extract your copy of the game (for example with `extract-xiso`) and copy it into a folder called
 `game_data_root` at the root of this repository:
 
 ```
@@ -306,6 +334,11 @@ settings menu (F1). Any setting can also be passed on the command line, e.g. `--
 | `soft_filter` | `false` | The game's soft blur over the whole picture (made for 720p). |
 | `story_costumes` | `true` | The four Z Chronicles costumes on the character select. |
 | `extra_stages` | `true` | The three Z Chronicles stages on the Versus / Training stage select (offline). |
+| `ki_charge` | `false` | Hold L3 to charge Ki (Shin Budokai style). Online: the host's value is used by both. |
+| `ki_charge_rate` | `16` | Ki added per frame while charging (the gauge holds 3000). |
+| `mods_enabled` | `true` | Use the mods switched on in the Mods menu (`mods\mods.toml`). |
+| `online_branding` | `true` | "Online" instead of "Xbox LIVE" in the menus and the Online Battle title. |
+| `button_icons` | `auto` | Button icons in the game's prompts: `auto` (the controller in use; Xbox for the keyboard or an unknown pad), `xbox` (Xbox Series), `playstation` or `switch`. |
 | `quick_menu_buttons` | `back+start` | Controller buttons for the settings menu: `back+start`, `l3+r3` or `none` (F1 always works). |
 | `debug_overlay` | `false` | FPS panel (F3). |
 | `debug_overlay_position` | `top-left` | `top-left`, `top-right`, `bottom-left` or `bottom-right`. |
@@ -330,7 +363,7 @@ settings menu (F1). Any setting can also be passed on the command line, e.g. `--
 | `texture_dump_enabled` | `false` | Dump textures to `textures/dump`. |
 | `texture_replace_enabled` | `false` | Load replacements from `textures/replace` (next to the exe). |
 | `texture_replace_preload` | `true` | Decode all the replacements in the background at startup, so they don't stutter the game when first used (keeps them in RAM; skipped for packs bigger than `texture_replace_ram_mb`). |
-| `texture_replace_ram_mb` | `3072` | RAM for decoded replacements; past it the least recently used ones are dropped. |
+| `texture_replace_ram_mb` | `3072` | RAM for decoded replacements; past it the least recently used ones are dropped. Raise it for big packs if you have the RAM (e.g. `12288` with 32 GB). |
 | `texture_folder` | *(exe folder)/textures* | Override the textures folder. |
 | `log_level` | `info` | `debug` / `info` / `warning` / `error`. |
 | `log_file` | *(empty)* | Log file (relative paths are from the working folder). The release `burstlimit.toml` sets `burstlimit.log`, next to the exe; empty = numbered files in `logs`. |
@@ -345,9 +378,9 @@ Both players need the **same version** (rooms are only listed between identical 
 The release `burstlimit.toml` already points `online_lobby_url` at the project's lobby
 (`wss://burstlimit-lobby.azoxrag2.workers.dev/v1/ws`), so it just works:
 
-- **Host:** Versus -> Xbox LIVE Battle -> Player Match -> **Create Match** -> pick the rules. Keep **Private
+- **Host:** Versus -> Online Battle -> Player Match -> **Create Match** -> pick the rules. Keep **Private
   Session OFF** (ON hides the room from the list). Wait in the Session Lobby.
-- **Guest:** Versus -> Xbox LIVE Battle -> Player Match -> **Custom Match** -> leave every search page on
+- **Guest:** Versus -> Online Battle -> Player Match -> **Custom Match** -> leave every search page on
   **Random** -> the host's room shows with their name; pick it.
 - Both press **Ready!** in the Session Lobby.
 - If Windows Firewall asks, allow `burstlimit.exe` (private and public networks).
@@ -409,6 +442,29 @@ Switch between the windows with Alt+Tab; the controller follows the focused wind
 
 ---
 
+## Mods
+
+Mods are folders in `mods\` next to `burstlimit.exe`:
+
+```
+mods/
+├─ mods.toml              (written by the Mods menu: enabled = ["My_Goku"])
+└─ My_Goku/
+   ├─ mod.toml            (optional: name = "...", author = "...", version = "...", description = "...")
+   └─ BCGOK002.NUX        (replaces the file of that name in LONG2DATA_US.CPK)
+```
+
+- File names are the names inside `LONG2DATA_US.CPK`; a path such as `PAC\CMN\CH\BCGOK\BCGOK002.NUX` works when
+  a name alone isn't unique.
+- PlayStation 3 models and textures (`NDP3` / `NTP3`) are converted to the Xbox 360 formats when the mod loads.
+- Turn mods on or off in **Main Menu > Mods** (Browse mods, then Apply). They apply right away, from each file's
+  next load. When two mods replace the same file, the one later in alphabetical order wins.
+- The game's own files are never changed: the game reads a virtual copy of the archive with the mod files in it.
+- Online, the mods in use are part of the version string, so rooms only match players with the same mods.
+- Mods can't be changed during an online session.
+
+---
+
 ## Known issues
 
 - The lobby online is new (0.4.0): it was tested between two houses (4-6 ms ping, 15,000 desync checks without
@@ -418,8 +474,7 @@ Switch between the windows with Alt+Tab; the controller follows the focused wind
 - A wider field of view can show missing objects at the edges of the screen: the game doesn't draw what it
   doesn't expect to be seen.
 - FSR 2 and FSR 3 can leave trails behind moving characters, as the game has no motion vectors for them.
-- NVIDIA DLSS / DLAA is experimental: its motion vectors only follow the camera, so very fast moves can leave a
-  faint trail. It needs an NVIDIA RTX GPU (on others the option does nothing). The upscaling modes only render
+- NVIDIA DLSS / DLAA needs an NVIDIA RTX GPU (on others the option does nothing). The upscaling modes only render
   in whole steps of the resolution scale (at 4K, Balanced renders at 1440p like Quality, not at NVIDIA's exact
   ratio), and at 1280x720 they're all DLAA.
 - On the stage select, Wasteland and Seaside Cliffs show the Mountains background and banner behind the list,
@@ -441,10 +496,16 @@ Switch between the windows with Alt+Tab; the controller follows the focused wind
 | `src/burstlimit_camera.cpp` | Free camera / photo mode. |
 | `src/burstlimit_online.cpp`, `src/burstlimit_netinput.cpp` | Online: version string, synced settings, notices; per-frame input channel, exact input delay, desync check. |
 | `src/burstlimit_app.h`, `src/main.cpp` | Application entry point and the settings menu. |
+| `src/burstlimit_install.cpp` | First-start install from the `.iso` (XDVDFS read, US check, copy). |
+| `src/burstlimit_mods.cpp` | Mods menu, virtual archive with the mod files, PS3 -> Xbox 360 model conversion. |
+| `src/burstlimit_kicharge.cpp` | Ki charge (hold L3). |
+| `src/burstlimit_branding.cpp` | "Online" instead of "Xbox LIVE" (text and title art). |
+| `src/burstlimit_saves.cpp` | Save export / import. |
+| `src/burstlimit_buttons.cpp` | PlayStation / Switch button icons, drawn into the game's textures as they load (`burstlimit_button_icons.inc`: the icons, made by `scripts/make_button_icons.py`). |
 | `res/` | Application icon (embedded into the exe). |
 | `generated/rexglue.cmake` | ReXGlue build glue. `generated/default/` is produced by the build. |
 | `thirdparty/rexglue-sdk` | ReXGlue SDK (submodule, `burstlimit` branch). |
-| `scripts/` | Online launch helpers. |
+| `scripts/` | Online launch helpers; `make_button_icons.py`. |
 
 Game changes are made with `[[entrypoint.midasm_hook]]` entries in the manifest, never by editing the
 generated code (it is regenerated on every build).
@@ -460,6 +521,8 @@ generated code (it is regenerated on every build).
 - AMD FidelityFX (FSR).
 - [libjuice](https://github.com/paullouisageneau/libjuice) (ICE / STUN / TURN for online play), MPL-2.0, used
   unmodified (`thirdparty/rexglue-sdk/thirdparty/libjuice`).
+- [Xelu's Free Controller Prompts](https://thoseawesomeguys.com/prompts/) by Nicolae "Xelu" Berbece, CC0 (public
+  domain) - the PlayStation and Nintendo Switch button icons.
 - Dragon Ball Z: Burst Limit © Bird Studio/Shueisha, Toei Animation. Published by Bandai Namco Games.
 
 ## Disclaimer

@@ -18,12 +18,18 @@ include(generated/rexglue.cmake)
 
 set(BURSTLIMIT_SOURCES
     src/main.cpp
+    src/burstlimit_branding.cpp
+    src/burstlimit_buttons.cpp
     src/burstlimit_camera.cpp
     src/burstlimit_cpk.cpp
     src/burstlimit_forms.cpp
+    src/burstlimit_install.cpp
+    src/burstlimit_kicharge.cpp
+    src/burstlimit_mods.cpp
     src/burstlimit_netinput.cpp
     src/burstlimit_online.cpp
     src/burstlimit_patches.cpp
+    src/burstlimit_saves.cpp
     src/burstlimit_stages.cpp
 )
 
@@ -90,6 +96,11 @@ target_compile_definitions(burstlimit PRIVATE "BURSTLIMIT_VERSION=\"${_bl_versio
 
 # ReXGlue UI sources use ImGui directly.
 target_link_libraries(burstlimit PRIVATE imgui::imgui)
+# stb_image's zlib decoder (save import reads compressed zips).
+target_include_directories(burstlimit PRIVATE "${REXSDK_DIR}/thirdparty/stb")
+if(WIN32)
+    target_link_libraries(burstlimit PRIVATE shell32)
+endif()
 target_include_directories(burstlimit PRIVATE "${CMAKE_BINARY_DIR}/rexglue-sdk/include")
 
 if(BURSTLIMIT_DISCORD)
