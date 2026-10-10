@@ -3,8 +3,11 @@
 // the character select screen: RB / LB change it for the character under the
 // cursor, next to Y's "Change Color", and a tag under the name shows it with
 // the form's face (the battle HUD's, read from the game's archive).
-// Online matches are left alone: each side's choice would only be known on
-// its own console (the game doesn't send it), and the match would desync.
+// Online (lobby mode) each console only sees its own side's RB / LB (the host
+// is side 0 / player 1 on both, the guest side 1 / player 2), so each one
+// sends its side's forms to the other over the connection's side channel
+// (kind 17) while the character select runs, and both load the same forms.
+// The older direct LAN / VPN online keeps the normal forms.
 //
 // The match request (address at 0x841B5138, filled by the character select or
 // a Z Chronicles battle) has an entry of 0x50 bytes per player:
@@ -45,6 +48,7 @@
 #include <rex/logging.h>
 #include <rex/memory.h>
 #include <rex/memory/utils.h>
+#include <rex/net/online.h>
 #include <rex/net/session.h>
 #include <rex/ppc/context.h>
 #include <rex/runtime.h>
@@ -59,6 +63,9 @@
 // Chronicles - Goku battle-damaged (vs 100% Frieza) and as Ginyu (green
 // scouter), Kid Gohan in his Raditz-saga outfit, Teen Gohan battle-damaged
 // (Cell Games). Their models, forms and motions are all in the game.
+REXCVAR_DEFINE_BOOL(start_forms, true, "Patches",
+                    "RB / LB on the character select pick the form a character starts the match "
+                    "in. Online, the host's setting is used by both players");
 REXCVAR_DEFINE_BOOL(story_costumes, true, "Patches",
                     "The Z Chronicles-only costumes on the character select (Y / Change Color): "
                     "Goku battle-damaged and as Ginyu, Kid Gohan's Raditz-saga outfit, Teen "
@@ -118,6 +125,21 @@ int FormCount(uint32_t character) {
 // The form picked per side and character, kept while the game runs (like the
 // colors the game keeps per slot).
 std::array<std::array<std::atomic<uint8_t>, kCharacterCount>, 2> g_forms{};
+
+// Online: this console's side (from its own button presses, -1 unknown) and
+// when its forms were last sent.
+std::atomic<int> g_local_side{-1};
+std::atomic<int64_t> g_forms_sent_ms{0};
+constexpr uint8_t kSideForms = rex::net::online::kGameSideKindFirst + 1;  // 17
+constexpr uint8_t kFormsVersion = 1;
+
+// Start forms can be used: switched on (online: the host's start_forms, synced
+// to the guest), and offline or online through the lobby (where they're
+// exchanged). Not on the direct LAN / VPN online.
+bool FormsAllowed() {
+  return REXCVAR_GET(start_forms) &&
+         (!rex::net::IsGameSessionOpen() || rex::net::online::IsLobbyMode());
+}
 // The character select's object and when its logic last ran.
 std::atomic<uint32_t> g_select_object{0};
 std::atomic<int64_t> g_select_seen_ms{0};
@@ -184,7 +206,33 @@ void BurstLimitCharSelectFrame(PPCRegister& r31) {
 void BurstLimitCharSelectButtons(PPCRegister& r19, PPCRegister& r30, PPCRegister& r31) {
   const uint32_t side = r30.u32;
   const uint32_t pressed = r19.u32;
-  if (side > 1 || !(pressed & (kButtonRB | kButtonLB)) || rex::net::IsGameSessionOpen()) {
+  if (!rex::net::IsGameSessionOpen()) {
+    g_local_side.store(-1, std::memory_order_relaxed);
+  }
+  if (side > 1 || !FormsAllowed()) {
+    return;
+  }
+  if (rex::net::IsGameSessionOpen()) {
+    // Only this console's side sees its buttons: send that side's forms to the
+    // other PC, twice a second while the screen runs (a lost frame or an older
+    // table on the other side is replaced right away).
+    if (pressed != 0) {
+      g_local_side.store(int(side), std::memory_order_relaxed);
+    }
+    const int64_t now = NowMs();
+    if (int(side) == g_local_side.load(std::memory_order_relaxed) &&
+        now - g_forms_sent_ms.load(std::memory_order_relaxed) >= 500) {
+      g_forms_sent_ms.store(now, std::memory_order_relaxed);
+      uint8_t packet[2 + kCharacterCount];
+      packet[0] = kFormsVersion;
+      packet[1] = uint8_t(side);
+      for (uint32_t c = 0; c < kCharacterCount; ++c) {
+        packet[2 + c] = g_forms[side][c].load(std::memory_order_relaxed);
+      }
+      rex::net::online::SendGameSide(kSideForms, packet, sizeof(packet), 1);
+    }
+  }
+  if (!(pressed & (kButtonRB | kButtonLB))) {
     return;
   }
   auto* memory = GuestMemory();
@@ -203,6 +251,27 @@ void BurstLimitCharSelectButtons(PPCRegister& r19, PPCRegister& r30, PPCRegister
               kForms[character][form]);
 }
 
+// burstlimit_netinput.cpp's side-channel handler, for kind 17: the other PC's
+// side and its start forms (network thread).
+bool BurstLimitFormsOnSide(uint8_t kind, const uint8_t* body, size_t size) {
+  if (kind != kSideForms) {
+    return false;
+  }
+  if (size < 2 + kCharacterCount || body[0] != kFormsVersion || body[1] > 1 ||
+      int(body[1]) == g_local_side.load(std::memory_order_relaxed)) {
+    return true;
+  }
+  bool changed = false;
+  for (uint32_t c = 0; c < kCharacterCount; ++c) {
+    const uint8_t form = std::min<uint8_t>(body[2 + c], uint8_t(std::max(FormCount(c) - 1, 0)));
+    changed |= g_forms[body[1]][c].exchange(form, std::memory_order_relaxed) != form;
+  }
+  if (changed) {
+    REXLOG_INFO("Character select: the other player's (side {}) start forms received", body[1]);
+  }
+  return true;
+}
+
 // Mid-asm hook at 0x8224530C in sub_82244F60 (the character select's setup),
 // after it caps the color counts: r30 = the screen's object, whose words at
 // +720 / +724 / +728 are the color counts of Goku, Kid Gohan and Teen Gohan.
@@ -217,6 +286,13 @@ void BurstLimitStoryCostumes(PPCRegister& r30) {
   rex::memory::store_and_swap<uint32_t>(object + 728, 3);
 }
 
+// The battle mode of the last match loaded, for the Discord presence.
+std::atomic<int> g_last_battle_mode{-1};
+
+int BurstLimitLastBattleMode() {
+  return g_last_battle_mode.load();
+}
+
 // Mid-asm hook at 0x82181E24 in sub_82181BB0 (lhz r28,6(r20)): r20 is the
 // player's match request entry, r24 the player (0 or 1).
 void BurstLimitStartFormLoad(PPCRegister& r20, PPCRegister& r24) {
@@ -228,15 +304,22 @@ void BurstLimitStartFormLoad(PPCRegister& r20, PPCRegister& r24) {
   uint8_t* entry = memory->TranslateVirtual<uint8_t*>(r20.u32);
   const uint16_t character = rex::memory::load_and_swap<uint16_t>(entry + kRequestCharacter);
   const uint32_t mode = LoadU32(memory, r20.u32 - player * kRequestStride + kRequestMode);
-  // Z Chronicles battles set their own forms; online matches stay as they are.
-  if (mode == kModeZChronicles || character >= kCharacterCount || rex::net::IsGameSessionOpen()) {
+  g_last_battle_mode.store(int(mode));
+  // Z Chronicles battles set their own forms; the direct LAN / VPN online stays
+  // as it is.
+  if (mode == kModeZChronicles || character >= kCharacterCount || !FormsAllowed()) {
     return;
   }
   const int wanted = g_forms[player][character].load(std::memory_order_relaxed);
   if (wanted <= 0) {
     return;
   }
-  const uint16_t max_form = rex::memory::load_and_swap<uint16_t>(entry + kRequestMaxForm);
+  uint16_t max_form = rex::memory::load_and_swap<uint16_t>(entry + kRequestMaxForm);
+  // Online the highest form isn't filled in yet when the models load (0): the
+  // character's own forms are the limit then.
+  if (max_form == 0 && rex::net::IsGameSessionOpen()) {
+    max_form = uint16_t(std::max(FormCount(character) - 1, 0));
+  }
   const uint16_t form = uint16_t(std::min<int>(wanted, max_form));
   rex::memory::store_and_swap<uint16_t>(entry + kRequestStartForm, form);
   rex::memory::store_and_swap<uint16_t>(entry + kRequestStartForm2, form);
@@ -279,8 +362,7 @@ class StartFormTags : public rex::ui::ImGuiDialog {
 
  protected:
   void OnDraw(ImGuiIO& io) override {
-    if (NowMs() - g_select_seen_ms.load(std::memory_order_relaxed) > 150 ||
-        rex::net::IsGameSessionOpen()) {
+    if (NowMs() - g_select_seen_ms.load(std::memory_order_relaxed) > 150 || !FormsAllowed()) {
       return;
     }
     auto* memory = GuestMemory();

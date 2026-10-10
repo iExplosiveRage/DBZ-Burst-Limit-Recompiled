@@ -35,6 +35,10 @@
 #include <rex/logging.h>
 #include <rex/ui/imgui_dialog.h>
 #include <rex/ui/overlay/overlay_text.h>
+#include <rex/ui/overlay/quick_menu.h>
+
+// burstlimit_buttons.cpp: the button_icons style now (0 Xbox, 1 PlayStation, 2 Switch).
+int BurstLimitButtonStyleNow();
 
 #pragma comment(lib, "bcrypt.lib")
 #pragma comment(lib, "comdlg32.lib")
@@ -136,138 +140,229 @@ class Installer final : public rex::ui::ImGuiDialog {
     if (state == State::kDone) {
       return;
     }
-    // Close to the game's own menus (purple, yellow highlight), drawn here:
-    // the game's art isn't installed yet.
+    // The start screen's layout (burstlimit_launcher.cpp), drawn plainly: the
+    // game's art (its font, logo, Goku) isn't installed yet. 1280x720 units in
+    // the window's 16:9 middle.
     namespace text = rex::ui::overlay_text;
-    const float u = io.DisplaySize.y / 1080.0f;
-    ImDrawList* draw = ImGui::GetForegroundDrawList();
-    draw->AddRectFilledMultiColor(ImVec2(0, 0), io.DisplaySize, IM_COL32(74, 22, 112, 255),
-                                  IM_COL32(52, 14, 86, 255), IM_COL32(16, 4, 30, 255),
-                                  IM_COL32(26, 8, 46, 255));
+    // Behind ImGui windows: the settings menu (F1, a window) opens over this.
+    ImDrawList* draw = ImGui::GetBackgroundDrawList();
+    // The settings menu's button hints for the controller in use.
+    static constexpr rex::ui::ButtonGlyphs kGlyphs[3] = {rex::ui::ButtonGlyphs::kXbox,
+                                                         rex::ui::ButtonGlyphs::kPlayStation,
+                                                         rex::ui::ButtonGlyphs::kNintendo};
+    const int style = BurstLimitButtonStyleNow();
+    if (style >= 0 && style < 3) {
+      rex::ui::SetButtonGlyphs(kGlyphs[style]);
+    }
+    const float frame_w = std::min(io.DisplaySize.x, io.DisplaySize.y * 16.0f / 9.0f);
+    const float u = frame_w / 1280.0f;
+    const ImVec2 origin((io.DisplaySize.x - frame_w) * 0.5f,
+                        (io.DisplaySize.y - frame_w * 9.0f / 16.0f) * 0.5f);
+    auto at = [&](float x, float y) { return ImVec2(origin.x + x * u, origin.y + y * u); };
 
-    const float width = std::min(io.DisplaySize.x - 60.0f * u, 1100.0f * u);
-    const float pad = 44.0f * u;
-    const float wrap = width - pad * 2.0f;
-    const float title_size = 44.0f * u, body_size = 28.0f * u, small_size = 24.0f * u;
-    auto height_of = [&](float size, const std::string& value) {
-      return text::Font(size)->CalcTextSizeA(size, FLT_MAX, wrap, value.c_str()).y;
+    // The title screen's red sky, roughly.
+    draw->AddRectFilled(ImVec2(0, 0), io.DisplaySize, IM_COL32(0, 0, 0, 255));
+    draw->AddRectFilledMultiColor(at(0, 0), at(1280, 720), IM_COL32(58, 10, 16, 255),
+                                  IM_COL32(104, 26, 30, 255), IM_COL32(52, 12, 18, 255),
+                                  IM_COL32(18, 4, 8, 255));
+    // A soft glow where the title screen's aura is.
+    for (int i = 0; i < 8; ++i) {
+      draw->AddCircleFilled(at(940, 300), (360.0f - 40.0f * float(i)) * u,
+                            IM_COL32(170, 70, 70, 7), 96);
+    }
+    // The settings menu open over this: only the background behind it.
+    if (rex::ui::QuickMenuDialog::IsOpen()) {
+      pad_seen_ = false;  // what closed it isn't a press here
+      return;
+    }
+
+    auto outlined = [&](float size, ImVec2 pos, ImU32 color, const char* value) {
+      const float o = std::max(1.5f, size * 0.06f);
+      for (const ImVec2 d : {ImVec2(-o, 0), ImVec2(o, 0), ImVec2(0, -o), ImVec2(0, o),
+                             ImVec2(-o, -o), ImVec2(o, -o), ImVec2(-o, o), ImVec2(o, o)}) {
+        text::Draw(draw, size, ImVec2(pos.x + d.x, pos.y + d.y), IM_COL32(30, 6, 10, 255), value);
+      }
+      text::Draw(draw, size, pos, color, value);
     };
+    // Where the logo goes, the name.
+    {
+      const float big_size = 74.0f * u, mid_size = 64.0f * u, small_size = 30.0f * u;
+      const float right = 1240.0f;
+      const ImVec2 a = text::Measure(big_size, "DRAGON BALL Z");
+      const ImVec2 b = text::Measure(mid_size, "BURST LIMIT");
+      const ImVec2 c = text::Measure(small_size, "RECOMPILED");
+      outlined(big_size, at(right - a.x / u, 30.0f), IM_COL32(255, 214, 40, 255), "DRAGON BALL Z");
+      outlined(mid_size, at(right - b.x / u, 30.0f + a.y / u - 6.0f), IM_COL32(236, 190, 90, 255),
+               "BURST LIMIT");
+      outlined(small_size, at(right - c.x / u, 30.0f + (a.y + b.y) / u - 6.0f),
+               IM_COL32(255, 255, 255, 255), "RECOMPILED");
+    }
 
-    const std::string title = "Dragon Ball Z: Burst Limit Recompiled";
-    std::string body, detail;
+    std::string help, detail;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       detail = message_;
     }
-    if (state == State::kWorking) {
-      body = "Installing the game files. This only happens once.";
-    } else {
-      body =
-          "The game files weren't found. Select your Dragon Ball Z: Burst Limit (USA) Xbox 360 "
-          "disc image (.iso). Its files are copied next to burstlimit.exe (about 3.3 GB). "
-          "This only happens once, and the .iso isn't changed.";
-    }
-    const float button_height = 64.0f * u;
-    float height = pad + height_of(title_size, title) + 28.0f * u + height_of(body_size, body) +
-                   30.0f * u;
-    if (state == State::kWorking) {
-      height += 40.0f * u + 16.0f * u + height_of(small_size, detail);
-    } else {
-      if (state == State::kError) {
-        height += height_of(body_size, detail) + 30.0f * u;
-      }
-      height += button_height * 2.0f;
-    }
-    height += pad - 16.0f * u;
 
-    const ImVec2 panel_min((io.DisplaySize.x - width) * 0.5f, (io.DisplaySize.y - height) * 0.5f);
-    const ImVec2 panel_max(panel_min.x + width, panel_min.y + height);
-    // The game's window: purple, lighter at the top, a thin light rim.
-    const float radius = 16.0f * u;
-    const ImU32 top_color = IM_COL32(92, 52, 140, 245), bottom_color = IM_COL32(40, 14, 72, 245);
-    draw->AddRectFilled(panel_min, ImVec2(panel_max.x, panel_min.y + radius * 2.0f), top_color,
-                        radius, ImDrawFlags_RoundCornersTop);
-    draw->AddRectFilled(ImVec2(panel_min.x, panel_max.y - radius * 2.0f), panel_max,
-                        bottom_color, radius, ImDrawFlags_RoundCornersBottom);
-    draw->AddRectFilledMultiColor(ImVec2(panel_min.x, panel_min.y + radius),
-                                  ImVec2(panel_max.x, panel_max.y - radius), top_color, top_color,
-                                  bottom_color, bottom_color);
-    draw->AddRect(panel_min, panel_max, IM_COL32(232, 222, 196, 230), radius, 0, 3.0f * u);
+    // The box: dark at the top to purple, beige rim; rows 42 apart.
+    const float x0 = 86.0f, x1 = 616.0f, y0 = 60.0f;
+    const float first_row = y0 + 30.0f, pitch = 42.0f, bar = 38.0f, item = 26.0f;
+    const bool working = state == State::kWorking;
+    const int rows = working ? 1 : 2;
+    const float y1 = first_row + float(rows) * pitch + (working ? 58.0f : 22.0f);
+    const float radius = 14.0f * u;
+    draw->AddRectFilledMultiColor(at(x0, y0 + 14.0f), at(x1, y1 - 14.0f),
+                                  IM_COL32(16, 6, 10, 245), IM_COL32(16, 6, 10, 245),
+                                  IM_COL32(64, 10, 98, 245), IM_COL32(64, 10, 98, 245));
+    draw->AddRectFilled(at(x0, y0), at(x1, y0 + 28.0f), IM_COL32(16, 6, 10, 245), radius,
+                        ImDrawFlags_RoundCornersTop);
+    draw->AddRectFilled(at(x0, y1 - 28.0f), at(x1, y1), IM_COL32(64, 10, 98, 245), radius,
+                        ImDrawFlags_RoundCornersBottom);
+    auto highlight = [&](float top) {
+      const float mid = x0 + (x1 - x0) * 0.45f;
+      draw->AddRectFilledMultiColor(at(x0 + 3.0f, top), at(mid, top + bar),
+                                    IM_COL32(150, 120, 214, 255), IM_COL32(89, 47, 131, 255),
+                                    IM_COL32(89, 47, 131, 255), IM_COL32(150, 120, 214, 255));
+      draw->AddRectFilledMultiColor(at(mid, top), at(x1 - 3.0f, top + bar),
+                                    IM_COL32(89, 47, 131, 255), IM_COL32(54, 9, 85, 120),
+                                    IM_COL32(54, 9, 85, 120), IM_COL32(89, 47, 131, 255));
+    };
+    auto row_text = [&](float top, const char* value, ImU32 color) {
+      const ImVec2 size = text::Measure(item * u, value);
+      outlined(item * u, ImVec2(at(x0 + 24.0f, 0).x, at(0, top).y + (bar * u - size.y) * 0.5f),
+               color, value);
+    };
 
-    float y = panel_min.y + pad;
-    const float x = panel_min.x + pad;
-    text::Draw(draw, title_size, ImVec2(x, y), IM_COL32(255, 214, 60, 255), title, wrap);
-    y += height_of(title_size, title) + 12.0f * u;
-    draw->AddLine(ImVec2(panel_min.x + 24.0f * u, y), ImVec2(panel_max.x - 24.0f * u, y),
-                  IM_COL32(210, 196, 220, 150), 2.0f * u);
-    y += 16.0f * u;
-    text::Draw(draw, body_size, ImVec2(x, y), IM_COL32(240, 236, 248, 255), body, wrap);
-    y += height_of(body_size, body) + 30.0f * u;
-
-    if (state == State::kWorking) {
+    int activated = -1;
+    const bool menu_open = rex::ui::QuickMenuDialog::IsOpen();
+    if (working) {
       const uint64_t total = total_.load();
       const uint64_t done = done_bytes_.load();
       const float fraction = total ? float(double(done) / double(total)) : 0.0f;
-      const ImVec2 track_min(x, y), track_max(x + wrap, y + 40.0f * u);
-      draw->AddRectFilled(track_min, track_max, IM_COL32(18, 4, 32, 255), 10.0f * u);
+      highlight(first_row);
+      char line[96];
+      std::snprintf(line, sizeof(line), "Installing...  %d%%", int(fraction * 100.0f));
+      row_text(first_row, line, IM_COL32(255, 255, 255, 255));
+      const ImVec2 track_min = at(x0 + 24.0f, first_row + pitch + 6.0f);
+      const ImVec2 track_max = at(x1 - 24.0f, first_row + pitch + 26.0f);
+      draw->AddRectFilled(track_min, track_max, IM_COL32(18, 4, 32, 255), 8.0f * u);
       if (fraction > 0.0f) {
         draw->AddRectFilledMultiColor(
-            track_min, ImVec2(x + wrap * std::min(fraction, 1.0f), track_max.y),
+            track_min, ImVec2(track_min.x + (track_max.x - track_min.x) * std::min(fraction, 1.0f),
+                              track_max.y),
             IM_COL32(255, 220, 60, 255), IM_COL32(255, 150, 10, 255),
             IM_COL32(255, 150, 10, 255), IM_COL32(255, 220, 60, 255));
       }
-      draw->AddRect(track_min, track_max, IM_COL32(200, 150, 255, 120), 10.0f * u, 0, 2.0f * u);
-      char percent[64];
-      std::snprintf(percent, sizeof(percent), "%d%%   %s / %s", int(fraction * 100.0f),
-                    GigaBytes(done).c_str(), GigaBytes(total).c_str());
-      const ImVec2 percent_size = text::Measure(small_size, percent);
-      const ImVec2 percent_pos(x + (wrap - percent_size.x) * 0.5f,
-                               y + (40.0f * u - percent_size.y) * 0.5f);
-      text::Draw(draw, small_size, ImVec2(percent_pos.x + 2.0f * u, percent_pos.y + 2.0f * u),
-                 IM_COL32(40, 10, 60, 255), percent);
-      text::Draw(draw, small_size, percent_pos, IM_COL32(255, 255, 255, 255), percent);
-      y += 40.0f * u + 16.0f * u;
-      text::Draw(draw, small_size, ImVec2(x, y), IM_COL32(190, 160, 220, 255), detail, wrap);
-      return;
+      draw->AddRect(track_min, track_max, IM_COL32(194, 180, 142, 160), 8.0f * u, 0, 1.5f * u);
+      help = "Installing the game files: " + GigaBytes(done) + " of " + GigaBytes(total) +
+             ". This only happens once.";
+    } else {
+      // The choices: the chosen one lit up. Keyboard, mouse and any
+      // controller (SDL: Xbox, PlayStation, Switch).
+      const char* labels[2] = {state == State::kError ? "Choose another .iso..." : "Choose .iso...",
+                               "Quit"};
+      const rex::ui::QuickMenuDialog::PadState pads = rex::ui::ReadGamepadsBeforeGame();
+      uint16_t buttons = pads.buttons;
+      if (pads.thumb_ly > 16000) buttons |= 0x0001;
+      if (pads.thumb_ly < -16000) buttons |= 0x0002;
+      const uint16_t pressed = pad_seen_ ? uint16_t(buttons & ~pad_buttons_) : 0;
+      pad_buttons_ = buttons;
+      pad_seen_ = true;
+      if (!menu_open && (ImGui::IsKeyPressed(ImGuiKey_DownArrow) ||
+                         ImGui::IsKeyPressed(ImGuiKey_UpArrow) || (pressed & 0x0003))) {
+        selected_ = 1 - selected_;
+      }
+      for (int row = 0; row < 2; ++row) {
+        const float top = first_row + float(row) * pitch;
+        const ImVec2 min = at(x0 + 3.0f, top), max = at(x1 - 3.0f, top + bar);
+        const bool hover = io.MousePos.x >= min.x && io.MousePos.x < max.x &&
+                           io.MousePos.y >= min.y && io.MousePos.y < max.y;
+        if (!menu_open && hover && (io.MouseDelta.x != 0.0f || io.MouseDelta.y != 0.0f)) {
+          selected_ = row;
+        }
+        if (!menu_open && hover && io.MouseClicked[0]) {
+          activated = row;
+        }
+        if (selected_ == row) {
+          highlight(top);
+        }
+        row_text(top, labels[row], IM_COL32(255, 255, 255, 255));
+      }
+      if (!menu_open && (ImGui::IsKeyPressed(ImGuiKey_Enter, false) ||
+                         ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false) ||
+                         (pressed & (0x1000 | 0x0010)))) {  // A (Cross) or Start
+        activated = selected_;
+      }
+      help = selected_ == 0
+                 ? "The game files weren't found. Choose your Dragon Ball Z: Burst Limit (USA) "
+                   "Xbox 360 disc image (.iso): its files are copied next to burstlimit.exe "
+                   "(about 3.3 GB). This only happens once, and the .iso isn't changed."
+                 : "Close the game.";
     }
+    draw->AddRect(at(x0, y0), at(x1, y1), IM_COL32(194, 180, 142, 255), radius, 0, 3.0f * u);
 
-    if (state == State::kError) {
-      text::Draw(draw, body_size, ImVec2(x, y), IM_COL32(255, 120, 110, 255), detail, wrap);
-      y += height_of(body_size, detail) + 30.0f * u;
+    // The band: a line, the description (and what went wrong), the prompts.
+    const float band_top = 516.0f, band_bottom = 680.0f;
+    draw->AddRectFilled(at(0, band_top - 6.0f), at(1280, band_top - 3.0f),
+                        IM_COL32(255, 255, 255, 200));
+    draw->AddRectFilledMultiColor(at(0, band_top), at(1280, band_bottom),
+                                  IM_COL32(10, 3, 12, 235), IM_COL32(10, 3, 12, 235),
+                                  IM_COL32(86, 24, 98, 235), IM_COL32(86, 24, 98, 235));
+    const float help_size = 24.0f * u;
+    text::Draw(draw, help_size, at(104.0f, 532.0f), IM_COL32(255, 255, 255, 255), help,
+               1070.0f * u);
+    if (!detail.empty() && state != State::kChoose) {
+      text::Draw(draw, 20.0f * u, at(104.0f, 604.0f),
+                 state == State::kError ? IM_COL32(255, 130, 120, 255) : IM_COL32(200, 180, 230, 255),
+                 detail, 1070.0f * u);
     }
-    // The choices as rows, like the game's menus: the chosen one lit up.
-    const char* labels[2] = {state == State::kError ? "Choose another .iso..." : "Choose .iso...",
-                             "Quit"};
-    if (ImGui::IsKeyPressed(ImGuiKey_DownArrow) || ImGui::IsKeyPressed(ImGuiKey_UpArrow)) {
-      selected_ = 1 - selected_;
-    }
-    int activated = -1;
-    for (int row = 0; row < 2; ++row) {
-      const ImVec2 min(panel_min.x + 10.0f * u, y), max(panel_max.x - 10.0f * u, y + button_height);
-      const bool hover = io.MousePos.x >= min.x && io.MousePos.x < max.x &&
-                         io.MousePos.y >= min.y && io.MousePos.y < max.y;
-      if (hover && (io.MouseDelta.x != 0.0f || io.MouseDelta.y != 0.0f)) {
-        selected_ = row;
+    if (!working) {
+      // Arrows Select, the confirm button Confirm.
+      const float prompt = 26.0f * u, r = 13.0f * u;
+      const ImVec2 select_size = text::Measure(prompt, "Select");
+      const ImVec2 confirm_size = text::Measure(prompt, "Confirm");
+      const float total = 2.0f * r * 2.0f + 6.0f * u + select_size.x + 18.0f * u + 2.0f * r +
+                          6.0f * u + confirm_size.x;
+      float px = at(1200.0f, 0).x - total;
+      const float mid = at(0, 654.0f).y;
+      for (int i = 0; i < 2; ++i) {
+        const float cx = px + r + float(i) * 2.0f * r, h = r * 0.9f;
+        const ImU32 yellow = IM_COL32(255, 222, 0, 255);
+        if (i == 0) {
+          draw->AddTriangleFilled(ImVec2(cx, mid - h), ImVec2(cx + h * 0.8f, mid + h * 0.2f),
+                                  ImVec2(cx - h * 0.8f, mid + h * 0.2f), yellow);
+          draw->AddRectFilled(ImVec2(cx - h * 0.3f, mid), ImVec2(cx + h * 0.3f, mid + h), yellow);
+        } else {
+          draw->AddTriangleFilled(ImVec2(cx, mid + h), ImVec2(cx - h * 0.8f, mid - h * 0.2f),
+                                  ImVec2(cx + h * 0.8f, mid - h * 0.2f), yellow);
+          draw->AddRectFilled(ImVec2(cx - h * 0.3f, mid - h), ImVec2(cx + h * 0.3f, mid), yellow);
+        }
       }
-      if (hover && io.MouseClicked[0]) {
-        activated = row;
+      px += 4.0f * r + 6.0f * u;
+      outlined(prompt, ImVec2(px, mid - select_size.y * 0.5f), IM_COL32(255, 255, 255, 255),
+               "Select");
+      px += select_size.x + 18.0f * u;
+      // The bottom face button, like the controller in use.
+      const ImVec2 c(px + r, mid);
+      if (style == 1) {
+        draw->AddCircleFilled(c, r, IM_COL32(34, 38, 46, 255), 32);
+        draw->AddCircle(c, r - 0.75f, IM_COL32(92, 100, 114, 255), 32, 1.5f);
+        const float k = r * 0.46f, t = std::max(1.5f, r * 0.15f);
+        draw->AddLine(ImVec2(c.x - k, c.y - k), ImVec2(c.x + k, c.y + k), IM_COL32(124, 178, 236, 255), t);
+        draw->AddLine(ImVec2(c.x - k, c.y + k), ImVec2(c.x + k, c.y - k), IM_COL32(124, 178, 236, 255), t);
+      } else {
+        draw->AddCircleFilled(c, r, style == 2 ? IM_COL32(58, 60, 66, 255) : IM_COL32(22, 150, 62, 255), 32);
+        const char* letter = style == 2 ? "B" : "A";
+        const ImVec2 ls = text::Measure(r * 1.27f, letter);
+        text::Draw(draw, r * 1.27f, ImVec2(c.x - ls.x * 0.5f, c.y - ls.y * 0.5f),
+                   IM_COL32(255, 255, 255, 255), letter);
       }
-      if (selected_ == row) {
-        draw->AddRectFilledMultiColor(min, max, IM_COL32(176, 140, 236, 235),
-                                      IM_COL32(120, 80, 190, 0), IM_COL32(120, 80, 190, 0),
-                                      IM_COL32(176, 140, 236, 235));
-      }
-      const ImVec2 label_size = text::Measure(body_size, labels[row]);
-      text::Draw(draw, body_size,
-                 ImVec2(x, min.y + (button_height - label_size.y) * 0.5f),
-                 selected_ == row ? IM_COL32(255, 255, 255, 255) : IM_COL32(196, 186, 210, 255),
-                 labels[row]);
-      y += button_height;
+      px += 2.0f * r + 6.0f * u;
+      outlined(prompt, ImVec2(px, mid - confirm_size.y * 0.5f), IM_COL32(255, 255, 255, 255),
+               "Confirm");
     }
-    if (ImGui::IsKeyPressed(ImGuiKey_Enter, false) ||
-        ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false)) {
-      activated = selected_;
-    }
+    const std::string version = std::string("Recompiled ") + BURSTLIMIT_VERSION;
+    text::Draw(draw, 18.0f * u, at(14.0f, 694.0f), IM_COL32(255, 255, 255, 150), version);
     // The file picker is modal: open it outside this frame.
     if (activated == 0) {
       defer_([this] { ChooseImage(); });
@@ -278,6 +373,8 @@ class Installer final : public rex::ui::ImGuiDialog {
 
  private:
   enum class State { kChoose, kWorking, kError, kDone };
+  uint16_t pad_buttons_ = 0;
+  bool pad_seen_ = false;
 
   void ChooseImage() {
     if (choosing_ || state_ == State::kWorking) {

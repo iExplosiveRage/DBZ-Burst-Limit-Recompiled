@@ -66,6 +66,9 @@ REXCVAR_DEFINE_BOOL(online_hold_freeze, false, "Patches",
                     "only), also stop the effect and HUD timers.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
+// burstlimit_forms.cpp: the other PC's start forms (side-channel kind 17).
+bool BurstLimitFormsOnSide(uint8_t kind, const uint8_t* body, size_t size);
+
 namespace {
 
 // --- Guest addresses -----------------------------------------------------------
@@ -209,6 +212,9 @@ struct Inbox {
 } g_inbox;
 
 void OnGameSide(uint8_t kind, const uint8_t* body, size_t size) {
+  if (BurstLimitFormsOnSide(kind, body, size)) {
+    return;
+  }
   if (kind != kSideInput || size < kInputHeader || body[0] != kInputVersion) {
     std::lock_guard<std::mutex> lock(g_inbox.mutex);
     ++g_inbox.bad;

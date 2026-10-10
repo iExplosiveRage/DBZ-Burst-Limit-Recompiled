@@ -1243,3 +1243,16 @@ void ButtonIconsDump(std::string_view args) {
 REXCVAR_DEFINE_COMMAND_ARGS(button_icons_dump, ButtonIconsDump, "Debug",
                             "Write the button icon textures (game's and redrawn) as raw RGBA "
                             "files: [folder]");
+
+// The style the button_icons setting picks right now (auto: the last controller
+// seen in the game, Xbox before it runs) - for the start screen.
+int BurstLimitButtonStyleNow() {
+  // Auto before the game's input runs: the controller the start screen sees.
+  if (REXCVAR_GET(button_icons) == "auto" && !rex::Runtime::instance()) {
+    const int seen = rex::ui::GamepadStyleBeforeGame();
+    if (seen >= 0) {
+      return seen;
+    }
+  }
+  return ResolveStyle(false);
+}

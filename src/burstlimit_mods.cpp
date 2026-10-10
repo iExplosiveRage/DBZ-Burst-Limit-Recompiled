@@ -1664,6 +1664,58 @@ std::string BurstLimitModsOnlineTag() {
   return state.online_tag;
 }
 
+// The start screen's Mods page: every mod folder's name and whether it's on.
+std::vector<std::pair<std::string, bool>> BurstLimitModsList() {
+  ModsState& state = State();
+  std::lock_guard<std::mutex> lock(state.mutex);
+  std::vector<std::pair<std::string, bool>> list;
+  for (const Mod& mod : state.mods) {
+    list.push_back({mod.name, mod.saved});
+  }
+  return list;
+}
+
+// The start screen's Mods page: switches mods on / off (by BurstLimitModsList
+// index) before the game boots - saved, and served from the start since the
+// game hasn't read the archive yet. Returns what happened, for the page.
+std::string BurstLimitModsSetBeforeBoot(const std::vector<bool>& on) {
+  ModsState& state = State();
+  std::lock_guard<std::mutex> lock(state.mutex);
+  if (on.size() != state.mods.size()) {
+    return "The mods folder changed - restart the game.";
+  }
+  std::vector<std::string> folders;
+  for (size_t m = 0; m < state.mods.size(); ++m) {
+    if (on[m]) {
+      folders.push_back(state.mods[m].folder);
+    }
+  }
+  if (!WriteEnabledList(state.directory, folders)) {
+    REXLOG_ERROR("Start screen: can't write {}", PathUtf8(state.directory / kListFile));
+    return "Couldn't save " + PathUtf8(state.directory / kListFile) + ".";
+  }
+  for (size_t m = 0; m < state.mods.size(); ++m) {
+    Mod& mod = state.mods[m];
+    if (mod.saved != on[m]) {
+      REXLOG_INFO("Start screen: mod {} = {}", mod.folder, on[m] ? "on" : "off");
+    }
+    mod.saved = mod.staged = on[m];
+  }
+  if (!state.overlay) {
+    return state.enabled ? "Saved." : "Saved (mods are off: mods_enabled = false).";
+  }
+  std::vector<bool> used(state.mods.size());
+  for (size_t m = 0; m < state.mods.size(); ++m) {
+    used[m] = on[m] && !state.mods[m].files.empty();
+    state.mods[m].loaded = used[m];
+  }
+  MapMods(state, used);
+  // The game reads the TOC from the file at boot: nothing to patch in memory.
+  state.pending_rows.clear();
+  BurstLimitOnlineUpdateVersion(state.online_tag);
+  return "Saved.";
+}
+
 // ---------------------------------------------------------------- the panel
 
 namespace {

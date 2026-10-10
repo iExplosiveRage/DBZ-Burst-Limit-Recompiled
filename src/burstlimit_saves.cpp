@@ -398,8 +398,8 @@ std::string ListZip(const std::vector<uint8_t>& zip, std::vector<ZipListing>& li
 }
 
 std::string ReadZipEntry(const std::vector<uint8_t>& zip, const ZipListing& item,
-                         std::vector<uint8_t>& data) {
-  if (item.size > 16 * 1024 * 1024 || uint64_t(item.local_offset) + 30 > zip.size() ||
+                         std::vector<uint8_t>& data, uint32_t max_size = 16 * 1024 * 1024) {
+  if (item.size > max_size || uint64_t(item.local_offset) + 30 > zip.size() ||
       Get32(&zip[item.local_offset]) != 0x04034B50) {
     return "The zip is damaged.";
   }
@@ -850,4 +850,29 @@ void BurstLimitSavesMenu(rex::ui::QuickMenuConfig& menu) {
     OpenSavesFolder({});
     SetStatus("Opened " + ShortName(SavesFolder()) + ".", false);
   };
+}
+
+// burstlimit_launcher.cpp (the self-update): every file entry of a zip with its
+// data, in zip order; `each` returns an error to stop. Empty = all fine.
+std::string BurstLimitUnzip(
+    const std::vector<uint8_t>& zip,
+    const std::function<std::string(const std::string& name, const std::vector<uint8_t>& data)>&
+        each) {
+  std::vector<ZipListing> listing;
+  if (std::string error = ListZip(zip, listing); !error.empty()) {
+    return error;
+  }
+  std::vector<uint8_t> data;
+  for (const ZipListing& item : listing) {
+    if (!item.name.empty() && item.name.back() == '/') {
+      continue;  // a folder
+    }
+    if (std::string error = ReadZipEntry(zip, item, data, 512u * 1024 * 1024); !error.empty()) {
+      return item.name + ": " + error;
+    }
+    if (std::string error = each(item.name, data); !error.empty()) {
+      return error;
+    }
+  }
+  return {};
 }

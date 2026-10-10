@@ -1,12 +1,15 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <cstdint>
 #include <mutex>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
+
+#include <windows.h>
 
 #include <rex/cvar.h>
 #include <rex/graphics/draw_overrides.h>
@@ -59,6 +62,10 @@ REXCVAR_DEFINE_BOOL(soft_filter, false, "Patches",
                     "The game's soft filter over the whole picture (a 4-tap average sized for "
                     "720p - above it, it blurs the picture a lot).")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+REXCVAR_DEFINE_STRING(window_size, "", "Patches",
+                      "Window size in windowed mode in pixels, for example \"640x480\" (empty = "
+                      "the default)");
 
 REXCVAR_DEFINE_INT32(field_of_view, 100, "Patches",
                      "Field of view in percent of the game's (100 = original, 120 = 20% wider).")
@@ -161,6 +168,30 @@ struct SceneUpscalerCvarCallbacks {
 };
 
 SceneUpscalerCvarCallbacks g_scene_upscaler_cvar_callbacks;
+
+// window_size ("640x480", empty = the default) sets window_width / window_height, which the
+// window follows right away (windowed mode).
+struct WindowSizeCvarCallback {
+  WindowSizeCvarCallback() {
+    rex::cvar::RegisterChangeCallback("window_size", [](std::string_view, std::string_view value) {
+      int width = 0, height = 0;
+      if (std::sscanf(std::string(value).c_str(), "%dx%d", &width, &height) != 2 || width <= 0 ||
+          height <= 0) {
+        width = height = 0;
+      }
+      // In real pixels: window_width / window_height are in Windows' scaled pixels.
+      const UINT dpi = GetDpiForSystem();
+      if (dpi > 96) {
+        width = int((int64_t(width) * 96 + dpi / 2) / dpi);
+        height = int((int64_t(height) * 96 + dpi / 2) / dpi);
+      }
+      rex::cvar::SetFlagByName("window_width", std::to_string(width));
+      rex::cvar::SetFlagByName("window_height", std::to_string(height));
+    });
+  }
+};
+
+WindowSizeCvarCallback g_window_size_cvar_callback;
 
 // Guest frame interval (vblanks per game tick). The game writes 2 (30 FPS)
 // through sub_82218940; the 60 FPS patch forces 1. The pause/match-quit code

@@ -25,6 +25,10 @@ set(BURSTLIMIT_SOURCES
     src/burstlimit_forms.cpp
     src/burstlimit_install.cpp
     src/burstlimit_kicharge.cpp
+    src/burstlimit_launcher.cpp
+    src/burstlimit_discord.cpp
+    src/burstlimit_menuart.cpp
+    src/burstlimit_menusound.cpp
     src/burstlimit_mods.cpp
     src/burstlimit_netinput.cpp
     src/burstlimit_online.cpp
@@ -32,15 +36,6 @@ set(BURSTLIMIT_SOURCES
     src/burstlimit_saves.cpp
     src/burstlimit_stages.cpp
 )
-
-# Optional Discord Rich Presence. Download the Discord Social SDK and point
-# DISCORD_SDK_ROOT at it (the folder that contains include/, lib/ and bin/).
-set(DISCORD_SDK_ROOT "" CACHE PATH "Discord Social SDK root (optional)")
-set(BURSTLIMIT_DISCORD OFF)
-if(DISCORD_SDK_ROOT AND EXISTS "${DISCORD_SDK_ROOT}/include/discordpp.h")
-    set(BURSTLIMIT_DISCORD ON)
-    list(APPEND BURSTLIMIT_SOURCES src/discord_presence.cpp)
-endif()
 
 if(WIN32)
     # Exe / window / taskbar icon.
@@ -98,22 +93,9 @@ target_compile_definitions(burstlimit PRIVATE "BURSTLIMIT_VERSION=\"${_bl_versio
 target_link_libraries(burstlimit PRIVATE imgui::imgui)
 # stb_image's zlib decoder (save import reads compressed zips).
 target_include_directories(burstlimit PRIVATE "${REXSDK_DIR}/thirdparty/stb")
+# nlohmann/json (the start screen reads the lobby's room list).
+target_include_directories(burstlimit PRIVATE "${REXSDK_DIR}/thirdparty/inja/third_party/include")
 if(WIN32)
     target_link_libraries(burstlimit PRIVATE shell32)
 endif()
 target_include_directories(burstlimit PRIVATE "${CMAKE_BINARY_DIR}/rexglue-sdk/include")
-
-if(BURSTLIMIT_DISCORD)
-    message(STATUS "Discord Rich Presence: ON (${DISCORD_SDK_ROOT})")
-    target_include_directories(burstlimit PRIVATE "${DISCORD_SDK_ROOT}/include")
-    target_link_libraries(burstlimit PRIVATE "${DISCORD_SDK_ROOT}/lib/release/discord_partner_sdk.lib")
-    add_custom_command(
-        TARGET burstlimit
-        POST_BUILD
-        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-            "${DISCORD_SDK_ROOT}/bin/release/discord_partner_sdk.dll"
-            "$<TARGET_FILE_DIR:burstlimit>/discord_partner_sdk.dll"
-    )
-else()
-    message(STATUS "Discord Rich Presence: OFF (set DISCORD_SDK_ROOT to enable)")
-endif()

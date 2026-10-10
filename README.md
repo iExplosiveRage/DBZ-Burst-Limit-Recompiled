@@ -2,6 +2,10 @@
   <img src="res/logo.png" alt="Dragon Ball Z: Burst Limit Recompiled" width="600">
 </p>
 
+<p align="center">
+  <a href="https://ko-fi.com/iexplosiverage"><img src="https://img.shields.io/badge/Ko--fi-Support%20the%20project-FF5E5B?logo=ko-fi&logoColor=white" alt="Support the project on Ko-fi"></a>
+</p>
+
 # Dragon Ball Z: Burst Limit Recompiled
 
 A static recompilation of **Dragon Ball Z: Burst Limit** (Xbox 360) to native Windows x64, built on the
@@ -23,11 +27,27 @@ normal Windows program instead of inside an emulator.
 - **Install from your disc image**: on the first start without game files, pick your Burst Limit (USA) Xbox 360
   `.iso` and the game files are copied next to `burstlimit.exe` (about 3.3 GB, once). The `.iso` is checked to be
   the US version first and isn't changed. `--install_iso=<path>` does the same without the file picker.
+- **Start screen** (`start_screen`) in the game's own style - the main menu's Goku, the logo, the game's font
+  and menu sounds, read from your game files: **Play**, **Mods**, **Settings**, **Update** and who's online
+  right now (players, how many on your version, the open rooms). "Play - don't show this screen again" skips it.
+
+  <img src="res/screenshots/start_screen.png" alt="Start screen" width="640">
+
+- **Updates from inside the game** (`update_check_url`): when GitHub has a newer release, the start screen shows
+  an **Update** button that downloads it, puts its files next to the exe (keeping `burstlimit.toml`, the game
+  files, saves, mods and textures) and restarts.
 - **Faster rendering**: clears done in place instead of EDRAM transfers, no per-frame re-upload of untouched
   memory, and the unclipped draws' extents worked out on the CPU - about **2x the FPS at native 4K** (100 -> 190+
   on an RTX 4080) and +40 % with DLAA; +32 % on an AMD integrated GPU at 1080p.
-- **In-game settings menu**: **F1**, or **Back + Start** on the controller. Resolution, upscaler, frame rate,
-  field of view, post effects, free camera and more; changes apply right away and are saved to `burstlimit.toml`.
+- **In-game settings menu**: **F1**, or **Back + Start** on the controller, in the game's menu style (its font,
+  menu box, button icons and sounds): DISPLAY, GRAPHICS, EFFECTS, GAME, ONLINE and SAVE. Resolution, window size,
+  upscalers, frame rate, field of view, post effects, free camera and more; changes apply right away and are
+  saved to `burstlimit.toml`.
+
+  <img src="res/screenshots/settings.png" alt="Settings menu" width="640">
+
+- **Window size** (`window_size`, when not fullscreen): 512x448 up to 2560x1440, and **Keep aspect ratio**
+  (`present_letterbox`): black bars, or the picture stretched to fill the window (a 4:3 screen, say).
 - **Frame rate cap** (`frame_rate`): 30 (the original), 60, 120, 144 or unlocked, with fixes for pause, quitting
   a match and Training's "Reset Standing Position" above 30 FPS.
 - **Resolution and upscaling**: internal resolution up to 4K and beyond, changeable while playing; AMD FSR 1/2/3
@@ -62,8 +82,9 @@ normal Windows program instead of inside an emulator.
   and RANDOM can pick them too. Offline only: online matches keep the original list.
 - **Start transformed**: on the character select, **RB / LB** pick the form a character starts the match in
   (Super Saiyan Goku, Final Form Frieza, Perfect Cell, ...), shown in a tag under its name with the form's face.
-  Works in Versus and Training; Z Chronicles battles keep their own forms. Offline only for now: online
-  matches keep the normal forms, as the other player's console wouldn't know the choice.
+  Works in Versus, Training and online lobby matches (each player picks their own; the choices are sent to
+  the other PC); Z Chronicles battles keep their own forms. `start_forms` turns it off (online: the host's
+  setting is used by both players).
 - **Free camera / photo mode** (`free_camera`): fly the camera anywhere - also in cinematics and super attacks -
   hide the HUD, zoom and tilt. **Freeze game** (`freeze_game`) stops the fight and its cutscenes while you move
   around (offline only). Keyboard: **Insert** and **Numpad 0**, both rebindable in the settings menu. For
@@ -75,10 +96,10 @@ normal Windows program instead of inside an emulator.
   controller in use, by position (A = Cross / B, B = Circle / A, LB = L1 / L, ...), drawn at high resolution, and
   the Xbox 360 pad of Control Settings and the tutorial becomes an Xbox Series controller, a DualSense or a pair
   of Joy-Cons. **Auto**
-  follows the controller you play with; Settings > Display > Button icons picks one.
+  follows the controller you play with; Settings > Game > Button icons picks one.
 - **FPS panel** (F3): frame rate, frame time graph, render resolution and upscaler, in any corner.
 - **Mods menu** (`mods_enabled`): a **Mods** entry in the main menu, under Options, in the game's own style and
-  sounds. A mod is a folder in `mods\` next to `burstlimit.exe` with replacement game files named like the files
+  sounds (and on the start screen). A mod is a folder in `mods\` next to `burstlimit.exe` with replacement game files named like the files
   in `LONG2DATA_US.CPK` (for example `BCGOK002.NUX`); PlayStation 3 model mods are converted on the fly. Switches
   apply without restarting, from each file's next load. The game's archive itself is never changed. Online, rooms
   only match players with the same mods on. See [Mods](#mods).
@@ -101,12 +122,17 @@ normal Windows program instead of inside an emulator.
   `online_tick_sleep`): the game normally sends input in 12-frame batches (~1 second of input delay even on LAN).
 - **Texture dumping / replacement** (`texture_dump_enabled`, `texture_replace_enabled`): put a texture pack in
   `textures\replace` and turn on **Texture pack** in the settings menu. PNG and DDS (BC1/BC2/BC3/**BC7** and
-  uncompressed) files are read. Replacements get mipmaps and are decoded in the background at startup (on several
-  threads), so they don't stutter the game when first used; packs bigger than `texture_replace_ram_mb` load as
-  they're used instead, and the least recently used ones leave RAM. Keep big packs on an SSD.
+  uncompressed) files are read. Replacements get mipmaps and never stall the game: one not decoded yet shows the
+  original texture for a moment while it's decoded and its upload prepared in the background
+  (`texture_replace_async`) - with a large DDS pack the worst hitch went from 1.7 s to 0.07 s, about the same as
+  without a pack. Small packs are also decoded at startup; bigger ones (over `texture_replace_ram_mb`) load as
+  they're used, and the least recently used ones leave RAM.
 - **Play time fix**: the game counts play time in presented frames, so above 60 FPS it ran fast; it counts real
   time now.
-- Optional **Discord Rich Presence**.
+- **Discord status** (`discord_presence`): your Discord profile shows that you're playing and what - the menus,
+  Z Chronicles, Training, Versus or online - through the Discord app's local connection (no SDK or DLL).
+- **The game's menu sounds** (`menu_sounds`) on the start screen and in the settings menu, read from the game's
+  sound bank.
 
 ---
 
@@ -270,13 +296,6 @@ The thumbnails of the three extra stages are made from screenshots of the game, 
 repository: they're built into the release `burstlimit.exe` from `src/burstlimit_stage_thumbs.inc`. Without
 that file the build still works, and those three entries show placeholder pictures.
 
-### Optional: Discord Rich Presence
-Download the Discord Social SDK and configure with:
-
-```bat
-cmake --preset win-amd64-relwithdebinfo -DDISCORD_SDK_ROOT=C:/path/to/discord_social_sdk
-```
-
 ---
 
 ## Running
@@ -293,7 +312,8 @@ Settings are stored in `burstlimit.toml` (see `burstlimit.toml.example`). Most o
 settings menu (F1). Any setting can also be passed on the command line, e.g. `--frame_rate=60`.
 
 ### Controls
-- An Xbox-compatible controller works out of the box.
+- Xbox, PlayStation and Nintendo Switch controllers work out of the box (also on the start screen and the
+  installer).
 - Keyboard: start with `--mnk_mode=true` (Space = A, Backspace = B, Enter = Start, WASD = move).
 - **F1** or **Back + Start**: settings menu (the buttons can be changed to L3 + R3 in the menu). **Y** in the
   menu turns the free camera on or off.
@@ -306,7 +326,7 @@ settings menu (F1). Any setting can also be passed on the command line, e.g. `--
 - Input only goes to the focused window.
 
 > **Stuck at 30 FPS on an NVIDIA GPU?** Don't set a **Max Frame Rate** of 60 for this game in the NVIDIA Control
-> Panel / NVIDIA App: it locks the game to 30. Use the game's own **Frame rate** setting (F1 -> GAME) instead.
+> Panel / NVIDIA App: it locks the game to 30. Use the game's own **Frame rate** setting (F1 -> DISPLAY) instead.
 
 ---
 
@@ -314,6 +334,12 @@ settings menu (F1). Any setting can also be passed on the command line, e.g. `--
 
 | Setting | Default | Description |
 |---|---|---|
+| `start_screen` | `true` | The start screen before the game (Play, Mods, Settings, Update, who's online). |
+| `update_check_url` | *(GitHub releases)* | Where the start screen looks for a newer release (empty = never). |
+| `window_size` | *(empty)* | Window size when not fullscreen, e.g. `640x480` (empty = the default). |
+| `present_letterbox` | `true` | Keep the 16:9 picture with black bars (off = stretch it to fill the window). |
+| `menu_sounds` | `true` | The game's menu sounds on the start screen and in the settings menu. |
+| `discord_presence` | `true` | Show what you're playing on your Discord profile. |
 | `frame_rate` | *(empty)* | Frame rate cap: `30` (the original), `60`, `120`, `144` or `unlocked`. Empty = from `patch_60fps` and `vsync` (older settings). |
 | `draw_resolution_scale_x/y` | `1` | Internal resolution scale: `1` = 720p, `2` = 1440p, `3` = 4K (sharper, heavier). |
 | `present_effect` | `bilinear` | `bilinear` (off), `cas` (sharpening), `fsr`, `fsr2`, `fsr3` (AMD FSR upscaling). |
@@ -332,6 +358,7 @@ settings menu (F1). Any setting can also be passed on the command line, e.g. `--
 | `fsr_version` | `auto` | `auto` (the newest the GPU has), `4` or `3`. |
 | `texture_lod_bias` | `0` | Texture detail: negative = sharper distant textures (-1 is NVIDIA's advice with DLSS). |
 | `soft_filter` | `false` | The game's soft blur over the whole picture (made for 720p). |
+| `start_forms` | `true` | RB / LB on the character select pick the start form. Online: the host's value is used by both. |
 | `story_costumes` | `true` | The four Z Chronicles costumes on the character select. |
 | `extra_stages` | `true` | The three Z Chronicles stages on the Versus / Training stage select (offline). |
 | `ki_charge` | `false` | Hold L3 to charge Ki (Shin Budokai style). Online: the host's value is used by both. |
@@ -362,6 +389,7 @@ settings menu (F1). Any setting can also be passed on the command line, e.g. `--
 | `vsync` | `true` | Older frame rate setting, only used while `frame_rate` is empty (`false` = unlocked). |
 | `texture_dump_enabled` | `false` | Dump textures to `textures/dump`. |
 | `texture_replace_enabled` | `false` | Load replacements from `textures/replace` (next to the exe). |
+| `texture_replace_async` | `true` | Never wait for a replacement to decode: the original texture shows until it's ready (no stutter). |
 | `texture_replace_preload` | `true` | Decode all the replacements in the background at startup, so they don't stutter the game when first used (keeps them in RAM; skipped for packs bigger than `texture_replace_ram_mb`). |
 | `texture_replace_ram_mb` | `3072` | RAM for decoded replacements; past it the least recently used ones are dropped. Raise it for big packs if you have the RAM (e.g. `12288` with 32 GB). |
 | `texture_folder` | *(exe folder)/textures* | Override the textures folder. |
@@ -482,6 +510,7 @@ mods/
 - Linux has been tested through vkd3d-proton and DXVK (the translation Proton uses) on NVIDIA and AMD GPUs, but
   not on a Linux machine yet. Wine's own Direct3D 12 (plain Wine without vkd3d-proton) isn't supported - use
   the Linux zip or Proton.
+- The start screen's Update button and the Discord status haven't been tested through Wine / Proton yet.
 - The Xbox LIVE friends list and leaderboards are not implemented.
 - Running two copies on one PC (local online test) can drop frames on slower machines.
 
