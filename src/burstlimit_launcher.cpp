@@ -1339,18 +1339,34 @@ std::unique_ptr<rex::ui::ImGuiDialog> BurstLimitCreateStartScreen(
 void BurstLimitUpdateCleanup(const std::filesystem::path& exe_directory) {
   std::error_code ec;
   fs::remove_all(exe_directory / "update_staging", ec);
-  int removed = 0;
-  for (const fs::path& folder : {exe_directory, exe_directory / "licenses"}) {
-    for (auto it = fs::directory_iterator(folder, ec); !ec && it != fs::directory_iterator();
-         it.increment(ec)) {
-      if (it->path().extension() == ".old" && it->is_regular_file()) {
-        std::error_code remove_ec;
-        removed += fs::remove(it->path(), remove_ec) ? 1 : 0;
+  // Right after an update's restart the old process may still hold its exe
+  // and DLLs for a moment: keep trying for a while, on a thread.
+  std::thread([exe_directory]() {
+    int removed = 0;
+    for (int attempt = 0; attempt < 30; ++attempt) {
+      int left = 0;
+      for (const fs::path& folder : {exe_directory, exe_directory / "licenses"}) {
+        std::error_code ec;
+        for (auto it = fs::directory_iterator(folder, ec); !ec && it != fs::directory_iterator();
+             it.increment(ec)) {
+          std::error_code type_ec;
+          if (it->path().extension() == ".old" && it->is_regular_file(type_ec)) {
+            std::error_code remove_ec;
+            if (fs::remove(it->path(), remove_ec)) {
+              ++removed;
+            } else {
+              ++left;
+            }
+          }
+        }
       }
+      if (!left) {
+        break;
+      }
+      std::this_thread::sleep_for(std::chrono::seconds(1));
     }
-    ec.clear();
-  }
-  if (removed) {
-    REXLOG_INFO("Update: removed {} file(s) the last update replaced", removed);
-  }
+    if (removed) {
+      REXLOG_INFO("Update: removed {} file(s) the last update replaced", removed);
+    }
+  }).detach();
 }

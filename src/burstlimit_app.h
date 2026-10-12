@@ -30,6 +30,10 @@ void BurstLimitSavesSetup(const std::filesystem::path& exe_directory,
                           const std::filesystem::path& user_data_root);
 void BurstLimitSavesMenu(rex::ui::QuickMenuConfig& menu);
 std::unique_ptr<rex::ui::ImGuiDialog> BurstLimitCreateOnlineNotice(rex::ui::ImGuiDrawer* drawer);
+// burstlimit_ranked.cpp: Ranked Match / leaderboard overlay, menu, identity folder.
+std::unique_ptr<rex::ui::ImGuiDialog> BurstLimitCreateRankedOverlay(rex::ui::ImGuiDrawer* drawer);
+void BurstLimitRankedMenu(rex::ui::QuickMenuConfig& menu);
+void BurstLimitRankedSetup(const std::filesystem::path& user_data_root);
 // burstlimit_forms.cpp
 std::unique_ptr<rex::ui::ImGuiDialog> BurstLimitCreateStartFormTags(
     rex::ui::ImGuiDrawer* drawer, rex::ui::ImmediateDrawer* immediate_drawer,
@@ -86,6 +90,8 @@ class BurstlimitApp : public rex::ReXApp {
     BurstLimitButtonsSetup(game_data_root());
     // Save export / import in the settings menu.
     BurstLimitSavesSetup(ExeDirectory(), user_data_root());
+    // The online identity (Ranked Match) lives in the user data folder.
+    BurstLimitRankedSetup(user_data_root());
   }
 
   // The start form tags of the character select (burstlimit_forms.cpp), and
@@ -93,6 +99,7 @@ class BurstlimitApp : public rex::ReXApp {
   void OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) override {
     start_form_tags_ = BurstLimitCreateStartFormTags(drawer, immediate_drawer(), game_data_root());
     online_notice_ = BurstLimitCreateOnlineNotice(drawer);
+    ranked_overlay_ = BurstLimitCreateRankedOverlay(drawer);
     mods_panel_ = BurstLimitCreateModsPanel(
         drawer, immediate_drawer(), game_data_root(),
         [this](std::function<void()> function) {
@@ -140,6 +147,7 @@ class BurstlimitApp : public rex::ReXApp {
       EarlySetup(defaults.game_data_root);
       // The settings menu's save export / import works from the start screen.
       BurstLimitSavesSetup(ExeDirectory(), defaults.user_data_root);
+      BurstLimitRankedSetup(defaults.user_data_root);
       start_screen_ = BurstLimitCreateStartScreen(
           imgui_drawer(), immediate_drawer(), defaults.game_data_root,
           [this, defaults, resume] {
@@ -171,6 +179,7 @@ class BurstlimitApp : public rex::ReXApp {
     rex::ui::UnregisterBind("bind_freeze_game");
     start_form_tags_.reset();
     online_notice_.reset();
+    ranked_overlay_.reset();
     mods_panel_.reset();
     installer_.reset();
     start_screen_.reset();
@@ -345,6 +354,15 @@ class BurstlimitApp : public rex::ReXApp {
         {{"1", "1280x720"}, {"2", "2560x1440"}, {"3", "3840x2160 (4K)"}, {"4", "5120x2880"}},
         "The resolution the game renders at. Higher is sharper but needs a faster GPU."));
     resolution.mirrored_cvars = {"draw_resolution_scale_y", "resolution_scale"};
+    // Below 1280x720 (draw_resolution_percent): only at the 1x Resolution.
+    Item& low_resolution = display.items.emplace_back(choice(
+        "Lower resolution", "draw_resolution_percent",
+        {{"100", "Off"}, {"75", "960x540 (75%)"}, {"50", "640x360 (50%)"}},
+        "For slow PCs: renders the game below 1280x720 and stretches it to the window, for more "
+        "FPS on a weak GPU (the picture gets softer). Off while NVIDIA DLSS or AMD FSR (GRAPHICS) "
+        "is on."));
+    low_resolution.shown_if_cvar = "draw_resolution_scale_x";
+    low_resolution.shown_if_values = {"1"};
     display.items.push_back(choice(
         "Frame rate", "frame_rate",
         {{"30", "30 FPS"},
@@ -581,6 +599,9 @@ class BurstlimitApp : public rex::ReXApp {
         "(Super Saiyan Goku, Final Form Frieza, Perfect Cell...) - online and offline. Online, "
         "the host's setting is used by both players."));
 
+    // Online rankings + your ranked line (burstlimit_ranked.cpp).
+    BurstLimitRankedMenu(menu);
+
     // Export / import of the save (burstlimit_saves.cpp).
     BurstLimitSavesMenu(menu);
   }
@@ -618,6 +639,7 @@ class BurstlimitApp : public rex::ReXApp {
  private:
   std::unique_ptr<rex::ui::ImGuiDialog> start_form_tags_;
   std::unique_ptr<rex::ui::ImGuiDialog> online_notice_;
+  std::unique_ptr<rex::ui::ImGuiDialog> ranked_overlay_;
   std::unique_ptr<rex::ui::ImGuiDialog> mods_panel_;
   std::unique_ptr<rex::ui::ImGuiDialog> installer_;
   std::unique_ptr<rex::ui::ImGuiDialog> start_screen_;

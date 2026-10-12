@@ -63,6 +63,11 @@ REXCVAR_DEFINE_BOOL(soft_filter, false, "Patches",
                     "720p - above it, it blurs the picture a lot).")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
+REXCVAR_DEFINE_BOOL(post_effects_hq, true, "Patches",
+                    "Depth of field, glow blur and motion blur read the picture the way they do "
+                    "at 720p (no thin ghost copies above draw_resolution_scale 1).")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 REXCVAR_DEFINE_STRING(window_size, "", "Patches",
                       "Window size in windowed mode in pixels, for example \"640x480\" (empty = "
                       "the default)");
@@ -111,6 +116,20 @@ void ApplyPostEffectSettings() {
   if (!REXCVAR_GET(soft_filter)) {
     overrides.push_back({kSoftFilterShader, true, {}});
   }
+  if (REXCVAR_GET(post_effects_hq)) {
+    // tf0 is the picture they blur (tf1 of the motion blur is its direction).
+    for (uint64_t shader : {kDepthOfFieldBlurShader, kGlowBlurShader, kMotionBlurShaders[0]}) {
+      bool skipped = false;
+      for (const auto& draw_override : overrides) {
+        skipped |= draw_override.ucode_hash == shader;
+      }
+      if (!skipped) {
+        rex::graphics::PixelShaderDrawOverride& soft = overrides.emplace_back();
+        soft.ucode_hash = shader;
+        soft.soft_texture_fetch_mask = 0b1;
+      }
+    }
+  }
   rex::graphics::SetPixelShaderDrawOverrides("burstlimit_post_effects", std::move(overrides));
 }
 
@@ -142,7 +161,8 @@ struct PostEffectCvarCallbacks {
   PostEffectCvarCallbacks() {
     ApplyPostEffectSettings();
     ApplyFieldOfView();
-    for (const char* name : {"depth_of_field", "glow_blur", "motion_blur", "soft_filter"}) {
+    for (const char* name : {"depth_of_field", "glow_blur", "motion_blur", "soft_filter",
+                             "post_effects_hq"}) {
       rex::cvar::RegisterChangeCallback(
           name, [](std::string_view, std::string_view) { ApplyPostEffectSettings(); });
     }

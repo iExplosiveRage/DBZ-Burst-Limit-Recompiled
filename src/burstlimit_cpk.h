@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -55,6 +56,35 @@ struct BurstLimitGlyph {
 };
 
 bool BurstLimitParseNfh(const std::vector<uint8_t>& nfh, std::vector<BurstLimitGlyph>& glyphs);
+
+// New file names in a CPK archive's table of contents (the mods overlay serves
+// mod files under names the game's archive doesn't have).
+//
+// A file to add: its folder and name as the TOC keeps them (upper case, '/'),
+// its size (stored uncompressed) and where its data starts, from the start of
+// the archive file.
+struct BurstLimitCpkAddedFile {
+  std::string directory;
+  std::string name;
+  uint64_t size = 0;
+  uint64_t position = 0;
+};
+
+// The TOC's @UTF table `table` (unencrypted, as the archive holds it after the
+// 16-byte "TOC " chunk header) with a row appended per file: the rows and the
+// string pool grow, and the existing rows, strings and their offsets stay as
+// they are. FileOffset of a new row is its position less `base` (where the
+// archive's FileOffset values start). Only for the usual TOC layout (per-row
+// DirName, FileName, FileSize, ExtractSize and FileOffset; any other column
+// the same for every row): false with `error` otherwise.
+bool BurstLimitCpkAppendToc(const std::vector<uint8_t>& table, uint64_t base,
+                            const std::vector<BurstLimitCpkAddedFile>& files,
+                            std::vector<uint8_t>& out, std::string& error);
+
+// Sets TocOffset and TocSize (the "TOC " chunk's size with its 16-byte header)
+// in the archive header's @UTF table (after the 16-byte "CPK " chunk header).
+bool BurstLimitCpkSetToc(std::vector<uint8_t>& header, uint64_t toc_offset, uint64_t toc_size,
+                         std::string& error);
 
 // One DXT5 block (the usual little-endian layout: alpha endpoints and indices, then
 // the color endpoints and indices) from 16 RGBA8 pixels, row by row. The NUT

@@ -155,6 +155,14 @@ std::pair<std::string, std::string> CurrentActivity() {
   if (!memory) {
     return {"Starting up", ""};
   }
+  // The arena is mapped a moment before the game's image is loaded into it:
+  // reading it then is an access violation (the whole game closes).
+  auto* heap = memory->LookupHeap(kBattlePointer);
+  rex::memory::HeapAllocationInfo info = {};
+  if (!heap || !heap->QueryRegionInfo(kBattlePointer, &info) ||
+      !(info.state & rex::memory::kMemoryAllocationCommit)) {
+    return {"Starting up", ""};
+  }
   const bool fighting =
       rex::memory::load_and_swap<uint32_t>(memory->TranslateVirtual<uint8_t*>(kBattlePointer)) != 0;
   if (rex::net::IsGameSessionOpen()) {

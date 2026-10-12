@@ -7,6 +7,14 @@
 // is side 0 / player 1 on both, the guest side 1 / player 2), so each one
 // sends its side's forms to the other over the connection's side channel
 // (kind 17) while the character select runs, and both load the same forms.
+// Both consoles must start every fighter in the same form: a fighter one
+// console starts higher can transform on the other console when it can't on
+// this one, and the game's transformations wait for both consoles to load the
+// new form - the transformation then repeats until the connection is dropped
+// (GitHub issue #9). So online the forms come only from this match's
+// exchange: the local side's own choice (sent every 250 ms, whatever was
+// pressed) and the other side's table received during this character select -
+// never what this process kept from earlier offline play or other opponents.
 // The older direct LAN / VPN online keeps the normal forms.
 //
 // The match request (address at 0x841B5138, filled by the character select or
@@ -74,6 +82,9 @@ REXCVAR_DEFINE_BOOL(story_costumes, true, "Patches",
 // burstlimit_buttons.cpp: the button icons of the controller in use.
 int BurstLimitButtonStyle();
 bool BurstLimitRestyleWindowIcon(int index, int style, BurstLimitTexture& image);
+// burstlimit_slots.cpp: an extra character's forms (its own highest form,
+// start form 0) for a player that is one this match; true then.
+bool BurstLimitSlotsStartForm(uint32_t player, uint32_t entry);
 
 namespace {
 
@@ -123,15 +134,29 @@ int FormCount(uint32_t character) {
 }
 
 // The form picked per side and character, kept while the game runs (like the
-// colors the game keeps per slot).
+// colors the game keeps per slot). Offline only for the other side online:
+// see RemoteForms.
 std::array<std::array<std::atomic<uint8_t>, kCharacterCount>, 2> g_forms{};
 
-// Online: this console's side (from its own button presses, -1 unknown) and
-// when its forms were last sent.
-std::atomic<int> g_local_side{-1};
-std::atomic<int64_t> g_forms_sent_ms{0};
 constexpr uint8_t kSideForms = rex::net::online::kGameSideKindFirst + 1;  // 17
 constexpr uint8_t kFormsVersion = 1;
+// How often the local side's forms go out while the character select runs.
+constexpr int64_t kFormsSendMs = 250;
+// The character select's logic not running for this long = the next frame
+// it runs is a new character select.
+constexpr int64_t kNewSelectMs = 1500;
+
+// The game's online session block (sub_82211D70 / sub_82211E40): +28 this
+// console's player + 1 (1 host, 2 guest), +288 the other console's.
+constexpr uint32_t kNetSession = 0x84245E50;
+constexpr uint32_t kNetSessionLocalPlayer = 28;
+
+// Online: the other side's forms received during this character select (the
+// table of a side is only ever its own console's choice), and when the local
+// side's forms were last sent.
+std::array<std::atomic<uint8_t>, kCharacterCount> g_remote_forms{};
+std::atomic<int> g_remote_side{-1};  // the side g_remote_forms belong to; -1 none received
+std::atomic<int64_t> g_forms_sent_ms{0};
 
 // Start forms can be used: switched on (online: the host's start_forms, synced
 // to the guest), and offline or online through the lobby (where they're
@@ -157,6 +182,61 @@ rex::memory::Memory* GuestMemory() {
 
 uint32_t LoadU32(rex::memory::Memory* memory, uint32_t address) {
   return rex::memory::load_and_swap<uint32_t>(memory->TranslateVirtual<uint8_t*>(address));
+}
+
+bool OnlineForms() {
+  return rex::net::IsGameSessionOpen() && rex::net::online::IsLobbyMode();
+}
+
+// Online: this console's side (0 host, 1 guest) as the game keeps it; -1
+// offline or unknown.
+int LocalSide(rex::memory::Memory* memory) {
+  if (!memory || !OnlineForms()) {
+    return -1;
+  }
+  const uint32_t player = LoadU32(memory, kNetSession + kNetSessionLocalPlayer);
+  return (player == 1 || player == 2) ? int(player) - 1 : -1;
+}
+
+// The start form a side uses for a character: offline the side's own choice;
+// online the local side's own choice, and the other side's only as received
+// from its console during this character select (0 until then).
+int FormFor(rex::memory::Memory* memory, uint32_t side, uint32_t character) {
+  if (side > 1 || character >= kCharacterCount) {
+    return 0;
+  }
+  if (!rex::net::IsGameSessionOpen()) {
+    return g_forms[side][character].load(std::memory_order_relaxed);
+  }
+  const int local = LocalSide(memory);
+  if (local < 0) {
+    return 0;
+  }
+  if (int(side) == local) {
+    return g_forms[side][character].load(std::memory_order_relaxed);
+  }
+  return g_remote_side.load(std::memory_order_acquire) == int(side)
+             ? g_remote_forms[character].load(std::memory_order_relaxed)
+             : 0;
+}
+
+void ForgetRemoteForms() {
+  g_remote_side.store(-1, std::memory_order_release);
+  for (auto& form : g_remote_forms) {
+    form.store(0, std::memory_order_relaxed);
+  }
+}
+
+// Online: the local side's forms to the other console.
+void SendLocalForms(int local_side) {
+  uint8_t packet[2 + kCharacterCount];
+  packet[0] = kFormsVersion;
+  packet[1] = uint8_t(local_side);
+  for (uint32_t c = 0; c < kCharacterCount; ++c) {
+    packet[2 + c] = g_forms[local_side][c].load(std::memory_order_relaxed);
+  }
+  g_forms_sent_ms.store(NowMs(), std::memory_order_relaxed);
+  rex::net::online::SendGameSide(kSideForms, packet, sizeof(packet), 1);
 }
 
 // Whether guest memory can be read (the tags read the screen's object from
@@ -196,8 +276,27 @@ uint32_t SideStep(rex::memory::Memory* memory, uint32_t side) {
 // Mid-asm hook at 0x82249174 in sub_82249140 (the character select's logic):
 // r31 = the screen's object.
 void BurstLimitCharSelectFrame(PPCRegister& r31) {
+  const int64_t now = NowMs();
+  const int64_t last = g_select_seen_ms.exchange(now, std::memory_order_relaxed);
   g_select_object.store(r31.u32, std::memory_order_relaxed);
-  g_select_seen_ms.store(NowMs(), std::memory_order_relaxed);
+  if (!FormsAllowed() || !rex::net::IsGameSessionOpen()) {
+    return;
+  }
+  auto* memory = GuestMemory();
+  const int local = LocalSide(memory);
+  if (now - last > kNewSelectMs) {
+    // A new character select online: only what the other console sends from
+    // now on counts for its side (not an earlier opponent's or match's table).
+    ForgetRemoteForms();
+    REXLOG_INFO("Character select (online): this console is side {}; start forms are exchanged",
+                local);
+  }
+  // The local side's forms, a few times a second for as long as the screen
+  // runs - also when nothing but A was pressed (the other console then loads
+  // this side in its normal form, as this console does).
+  if (local >= 0 && now - g_forms_sent_ms.load(std::memory_order_relaxed) >= kFormsSendMs) {
+    SendLocalForms(local);
+  }
 }
 
 // Mid-asm hook at 0x8224A860 in sub_82249140, where a side's cursor checks Y
@@ -206,36 +305,16 @@ void BurstLimitCharSelectFrame(PPCRegister& r31) {
 void BurstLimitCharSelectButtons(PPCRegister& r19, PPCRegister& r30, PPCRegister& r31) {
   const uint32_t side = r30.u32;
   const uint32_t pressed = r19.u32;
-  if (!rex::net::IsGameSessionOpen()) {
-    g_local_side.store(-1, std::memory_order_relaxed);
-  }
-  if (side > 1 || !FormsAllowed()) {
-    return;
-  }
-  if (rex::net::IsGameSessionOpen()) {
-    // Only this console's side sees its buttons: send that side's forms to the
-    // other PC, twice a second while the screen runs (a lost frame or an older
-    // table on the other side is replaced right away).
-    if (pressed != 0) {
-      g_local_side.store(int(side), std::memory_order_relaxed);
-    }
-    const int64_t now = NowMs();
-    if (int(side) == g_local_side.load(std::memory_order_relaxed) &&
-        now - g_forms_sent_ms.load(std::memory_order_relaxed) >= 500) {
-      g_forms_sent_ms.store(now, std::memory_order_relaxed);
-      uint8_t packet[2 + kCharacterCount];
-      packet[0] = kFormsVersion;
-      packet[1] = uint8_t(side);
-      for (uint32_t c = 0; c < kCharacterCount; ++c) {
-        packet[2 + c] = g_forms[side][c].load(std::memory_order_relaxed);
-      }
-      rex::net::online::SendGameSide(kSideForms, packet, sizeof(packet), 1);
-    }
-  }
-  if (!(pressed & (kButtonRB | kButtonLB))) {
+  if (side > 1 || !FormsAllowed() || !(pressed & (kButtonRB | kButtonLB))) {
     return;
   }
   auto* memory = GuestMemory();
+  // Online only this console's side picks its forms here; the other side's
+  // come from its console.
+  const int local = LocalSide(memory);
+  if (rex::net::IsGameSessionOpen() && int(side) != local) {
+    return;
+  }
   uint32_t character;
   if (!memory || !CursorCharacter(memory, r31.u32, side, character)) {
     return;
@@ -249,6 +328,9 @@ void BurstLimitCharSelectButtons(PPCRegister& r19, PPCRegister& r30, PPCRegister
   g_forms[side][character].store(uint8_t(form), std::memory_order_relaxed);
   REXLOG_INFO("Character select: side {} character {} start form {} ({})", side, character, form,
               kForms[character][form]);
+  if (local >= 0) {
+    SendLocalForms(local);
+  }
 }
 
 // burstlimit_netinput.cpp's side-channel handler, for kind 17: the other PC's
@@ -257,17 +339,24 @@ bool BurstLimitFormsOnSide(uint8_t kind, const uint8_t* body, size_t size) {
   if (kind != kSideForms) {
     return false;
   }
-  if (size < 2 + kCharacterCount || body[0] != kFormsVersion || body[1] > 1 ||
-      int(body[1]) == g_local_side.load(std::memory_order_relaxed)) {
+  const int local = LocalSide(GuestMemory());
+  if (size < 2 + kCharacterCount || body[0] != kFormsVersion || local < 0 ||
+      int(body[1]) != 1 - local) {
     return true;
   }
-  bool changed = false;
+  bool changed = g_remote_side.load(std::memory_order_acquire) != int(body[1]);
   for (uint32_t c = 0; c < kCharacterCount; ++c) {
     const uint8_t form = std::min<uint8_t>(body[2 + c], uint8_t(std::max(FormCount(c) - 1, 0)));
-    changed |= g_forms[body[1]][c].exchange(form, std::memory_order_relaxed) != form;
+    changed |= g_remote_forms[c].exchange(form, std::memory_order_relaxed) != form;
   }
+  g_remote_side.store(int(body[1]), std::memory_order_release);
   if (changed) {
-    REXLOG_INFO("Character select: the other player's (side {}) start forms received", body[1]);
+    std::string forms;
+    for (uint32_t c = 0; c < kCharacterCount; ++c) {
+      forms += char('0' + g_remote_forms[c].load(std::memory_order_relaxed));
+    }
+    REXLOG_INFO("Character select: the other player's (side {}) start forms received: {}", body[1],
+                forms);
   }
   return true;
 }
@@ -305,24 +394,35 @@ void BurstLimitStartFormLoad(PPCRegister& r20, PPCRegister& r24) {
   const uint16_t character = rex::memory::load_and_swap<uint16_t>(entry + kRequestCharacter);
   const uint32_t mode = LoadU32(memory, r20.u32 - player * kRequestStride + kRequestMode);
   g_last_battle_mode.store(int(mode));
+  // An extra character (burstlimit_slots.cpp) plays as this character but has
+  // its own forms: its RB / LB choice isn't used.
+  if (BurstLimitSlotsStartForm(player, r20.u32)) {
+    return;
+  }
   // Z Chronicles battles set their own forms; the direct LAN / VPN online stays
   // as it is.
   if (mode == kModeZChronicles || character >= kCharacterCount || !FormsAllowed()) {
     return;
   }
-  const int wanted = g_forms[player][character].load(std::memory_order_relaxed);
+  const int wanted = FormFor(memory, player, character);
+  if (rex::net::IsGameSessionOpen()) {
+    REXLOG_INFO("Start form (online): player {} character {} form {} ({} side)", player + 1,
+                character, wanted, int(player) == LocalSide(memory) ? "this console's" : "the other");
+  }
   if (wanted <= 0) {
     return;
   }
   uint16_t max_form = rex::memory::load_and_swap<uint16_t>(entry + kRequestMaxForm);
-  // Online the highest form isn't filled in yet when the models load (0): the
-  // character's own forms are the limit then.
+  // The highest form is the player's own (its save's unlocked forms - 0 with a
+  // new save; the game exchanges it, so it's the same on both consoles).
+  // Online, 0 lets the character's own forms be the limit, like before.
   if (max_form == 0 && rex::net::IsGameSessionOpen()) {
     max_form = uint16_t(std::max(FormCount(character) - 1, 0));
   }
   const uint16_t form = uint16_t(std::min<int>(wanted, max_form));
   rex::memory::store_and_swap<uint16_t>(entry + kRequestStartForm, form);
-  rex::memory::store_and_swap<uint16_t>(entry + kRequestStartForm2, form);
+  // +0x12 is a byte; +0x13 next to it is the CPU AI level (sub_82165260), so write one byte only.
+  entry[kRequestStartForm2] = uint8_t(form);
   REXLOG_INFO("Start form: player {} character {} mode {} form {}", player + 1, character, mode,
               form);
 }
@@ -393,7 +493,7 @@ class StartFormTags : public rex::ui::ImGuiDialog {
           FormCount(character) < 2) {
         continue;
       }
-      const int form = g_forms[side][character].load(std::memory_order_relaxed);
+      const int form = FormFor(memory, side, character);
       if (!picking && form == 0) {
         continue;
       }

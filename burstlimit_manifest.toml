@@ -237,6 +237,325 @@ address = 0x820EB784
 name = "BurstLimitStagesThumbnailData"
 registers = ["r26", "r29", "r30"]
 
+# --- Extra character slots: a player that plays as a game character but loads
+# its own files (src/burstlimit_slots.cpp) ---
+
+# Fighter loader sub_82181BB0, stw r21,60(r31): r21 = the character's record
+# (moveset / hand / lip / voice-key paths, form -> model map), r24 = player.
+[[entrypoint.midasm_hook]]
+address = 0x82181C14
+name = "BurstLimitSlotsRecord"
+registers = ["r21", "r24"]
+
+# sub_8218B818 (a costume's model + skeleton), bl sub_82123218 once the paths
+# are picked: r5 = record, r11 = model index * 64, r21 = model (NUX), r24 =
+# skeleton (AMB), r28 = player. Also runs for transformations (0x82195B90).
+[[entrypoint.midasm_hook]]
+address = 0x8218B8F4
+name = "BurstLimitSlotsModel"
+registers = ["r5", "r11", "r21", "r24", "r28"]
+
+# Sound banks, sub_821B61D0 (P1) / sub_821B62F0 (P2): the SE bank (bl
+# sub_82219AE8, r4 = path) and the voice bank's name (bl snprintf "%s%s",
+# r6 = SOUND/CSB/US/ or /JP/, r7 = the file name).
+[[entrypoint.midasm_hook]]
+address = 0x821B6268
+name = "BurstLimitSlotsSoundEffects1"
+registers = ["r4"]
+
+[[entrypoint.midasm_hook]]
+address = 0x821B6388
+name = "BurstLimitSlotsSoundEffects2"
+registers = ["r4"]
+
+[[entrypoint.midasm_hook]]
+address = 0x821B62C0
+name = "BurstLimitSlotsVoice1"
+registers = ["r6", "r7"]
+
+[[entrypoint.midasm_hook]]
+address = 0x821B640C
+name = "BurstLimitSlotsVoice2"
+registers = ["r6", "r7"]
+
+# Effect files, sub_821D2BF0 (P1) / sub_821D2DD0 (P2), bl sub_82119480 with
+# r4 = the path: ESP, EAS, _MODEL, ARST.
+[[entrypoint.midasm_hook]]
+address = 0x821D2C94
+name = "BurstLimitSlotsEffectTextures1"
+registers = ["r4"]
+
+[[entrypoint.midasm_hook]]
+address = 0x821D2CE8
+name = "BurstLimitSlotsEffectTexturesEas1"
+registers = ["r4"]
+
+[[entrypoint.midasm_hook]]
+address = 0x821D2D3C
+name = "BurstLimitSlotsEffectModels1"
+registers = ["r4"]
+
+[[entrypoint.midasm_hook]]
+address = 0x821D2D8C
+name = "BurstLimitSlotsArst1"
+registers = ["r4"]
+
+[[entrypoint.midasm_hook]]
+address = 0x821D2E78
+name = "BurstLimitSlotsEffectTextures2"
+registers = ["r4"]
+
+[[entrypoint.midasm_hook]]
+address = 0x821D2ECC
+name = "BurstLimitSlotsEffectTexturesEas2"
+registers = ["r4"]
+
+[[entrypoint.midasm_hook]]
+address = 0x821D2F20
+name = "BurstLimitSlotsEffectModels2"
+registers = ["r4"]
+
+[[entrypoint.midasm_hook]]
+address = 0x821D2F70
+name = "BurstLimitSlotsArst2"
+registers = ["r4"]
+
+# A NUX file's textures, sub_82118228, bl sub_82132800: r3 = the texture
+# set's name inside the file (the game keeps one set per name), r30 = the
+# load request (+2 the path). A slot's own NUX files get a name of their own.
+[[entrypoint.midasm_hook]]
+address = 0x821182B4
+name = "BurstLimitSlotsNuxTextures"
+registers = ["r3", "r30"]
+
+# Effect scripts sub_821F2680 (BSP_<code>), bl sub_82119480: r4 = path,
+# r9 = player * 416.
+[[entrypoint.midasm_hook]]
+address = 0x821F26BC
+name = "BurstLimitSlotsEffectScript"
+registers = ["r4", "r9"]
+
+# sub_821446B0 (BAR_<code>), bl sub_82119480: r4 = path, r9 = player * 704.
+[[entrypoint.midasm_hook]]
+address = 0x821446EC
+name = "BurstLimitSlotsBar"
+registers = ["r4", "r9"]
+
+# Battle HUD face BUFAC_<code>.NUT, sub_821DD6E8 (P1) / sub_821DD7A8 (P2),
+# bl sub_82119480: r4 = path.
+[[entrypoint.midasm_hook]]
+address = 0x821DD794
+name = "BurstLimitSlotsHudFace1"
+registers = ["r4"]
+
+[[entrypoint.midasm_hook]]
+address = 0x821DD854
+name = "BurstLimitSlotsHudFace2"
+registers = ["r4"]
+
+# The battle HUD sub_821E2CA0 (r20 = player), after each bl sub_82141F20(2,
+# 0x826C7B58[character]) that gets the life bar's name (BTL_SYSTEM.NFX text):
+# 2P measured / drawn, then 1P. r3 = the text.
+[[entrypoint.midasm_hook]]
+address = 0x821E426C
+name = "BurstLimitSlotsHudName"
+registers = ["r3", "r20"]
+
+[[entrypoint.midasm_hook]]
+address = 0x821E42A8
+name = "BurstLimitSlotsHudName"
+registers = ["r3", "r20"]
+
+[[entrypoint.midasm_hook]]
+address = 0x821E4328
+name = "BurstLimitSlotsHudName"
+registers = ["r3", "r20"]
+
+[[entrypoint.midasm_hook]]
+address = 0x821E43E8
+name = "BurstLimitSlotsHudName"
+registers = ["r3", "r20"]
+
+[[entrypoint.midasm_hook]]
+address = 0x821E45F0
+name = "BurstLimitSlotsHudName"
+registers = ["r3", "r20"]
+
+[[entrypoint.midasm_hook]]
+address = 0x821E462C
+name = "BurstLimitSlotsHudName"
+registers = ["r3", "r20"]
+
+[[entrypoint.midasm_hook]]
+address = 0x821E4690
+name = "BurstLimitSlotsHudName"
+registers = ["r3", "r20"]
+
+[[entrypoint.midasm_hook]]
+address = 0x821E4738
+name = "BurstLimitSlotsHudName"
+registers = ["r3", "r20"]
+
+# Each side's full picture after the picks: sub_822371B8, bl sub_82237060
+# (r31 = the side's block + 16), then in sub_82237060 bl sub_8227F040 (r4 =
+# the NUT path, r5 = the layout AMA).
+[[entrypoint.midasm_hook]]
+address = 0x822371FC
+name = "BurstLimitSlotsUicmnSide"
+registers = ["r31"]
+
+[[entrypoint.midasm_hook]]
+address = 0x822371A8
+name = "BurstLimitSlotsUicmn"
+registers = ["r4", "r5"]
+
+# The "Start battle with these settings?" window sub_8223BE10 (r29 = the
+# side's block + 16): the side's name after bl sub_8228F5C0 (r3), and its
+# Ultimate list (lhz r10,0(r9)).
+[[entrypoint.midasm_hook]]
+address = 0x8223CF78
+name = "BurstLimitSlotsConfirmName"
+registers = ["r3", "r29"]
+
+[[entrypoint.midasm_hook]]
+address = 0x8223CFC0
+name = "BurstLimitSlotsConfirmUltimate"
+registers = ["r9", "r29"]
+
+# ... and the Ultimate's name after bl sub_822803E0 (r3): a slot.toml name.
+[[entrypoint.midasm_hook]]
+address = 0x8223D018
+name = "BurstLimitSlotsConfirmUltimateName"
+registers = ["r3", "r29"]
+
+# The match request sub_822120A0, before its mirror-colour rule (lhz
+# r11,80(r31) .. sth r11,92(r31)): r31 = the request. Takes the fight's extra
+# characters; with one, its colour / form / drama rules instead (true: skip
+# the game's rule).
+[[entrypoint.midasm_hook]]
+address = 0x82212360
+name = "BurstLimitSlotsRequest"
+registers = ["r31"]
+jump_address_on_true = 0x82212390
+
+# The session filled from the character select, same character and colour on
+# both sides, before 2P gets the next colour: Versus (3 menus) and Training.
+[[entrypoint.midasm_hook]]
+address = 0x82271DD0
+name = "BurstLimitSlotsSessionColour"
+jump_address_on_true = 0x82271E18
+
+[[entrypoint.midasm_hook]]
+address = 0x82272030
+name = "BurstLimitSlotsSessionColour"
+jump_address_on_true = 0x82272078
+
+[[entrypoint.midasm_hook]]
+address = 0x822722D0
+name = "BurstLimitSlotsSessionColour"
+jump_address_on_true = 0x82272318
+
+[[entrypoint.midasm_hook]]
+address = 0x82265F60
+name = "BurstLimitSlotsSessionColour"
+jump_address_on_true = 0x82265FA8
+
+# Character select setup sub_82244F60, li r3,8 once the lists, colours and
+# cards are set up (r30 = the object): the extra characters' page.
+[[entrypoint.midasm_hook]]
+address = 0x82245384
+name = "BurstLimitSlotsSelectSetup"
+registers = ["r30"]
+
+# sub_82249140, a side's frame, beq where it checks its cursor's move ended:
+# R2 / L2 switch the side's page; true goes on as when the cursor stops (big
+# picture, name, cards). r17 target, r19 buttons pressed, r30 side, r31 object.
+[[entrypoint.midasm_hook]]
+address = 0x82249F2C
+name = "BurstLimitSlotsSelectPage"
+registers = ["r17", "r19", "r30", "r31"]
+jump_address_on_true = 0x82249F54
+
+# sub_82243808 (a side's cards), cmpwi r4,0: r4 = sprite part, r27 = side,
+# r28 = mirrored, r30 = object, r31 = card.
+[[entrypoint.midasm_hook]]
+address = 0x82243980
+name = "BurstLimitSlotsCardPart"
+registers = ["r4", "r27", "r28", "r30", "r31"]
+
+# sub_82243808, the card's sprite made (r3), before stw r3,0(r26).
+[[entrypoint.midasm_hook]]
+address = 0x822439A4
+name = "BurstLimitSlotsCardTexture"
+registers = ["r3", "r27", "r30", "r31"]
+
+# sub_82248CD0 (big picture and name), cmpwi r5,0: r5 = the picture's
+# animation, r27 = list value, r31 = side.
+[[entrypoint.midasm_hook]]
+address = 0x82248DF0
+name = "BurstLimitSlotsPortrait"
+registers = ["r5", "r27", "r31"]
+
+# sub_82248CD0, the name's text (r3) before it's kept (r27 value, r31 side).
+[[entrypoint.midasm_hook]]
+address = 0x82248F20
+name = "BurstLimitSlotsName"
+registers = ["r3", "r27", "r31"]
+
+# sub_82249140, Y (Change Color): cmpwi r7,21 / bge skips values 21+; true
+# goes on at 0x8224A8AC for an extra character (r7 value, r30 side).
+[[entrypoint.midasm_hook]]
+address = 0x8224A8A4
+name = "BurstLimitSlotsColour"
+registers = ["r7", "r30"]
+jump_address_on_true = 0x8224A8AC
+
+# sub_82249140, A on a card: mr r3,r28 returns the list value (r30 side).
+[[entrypoint.midasm_hook]]
+address = 0x8224A4E4
+name = "BurstLimitSlotsConfirm"
+registers = ["r28", "r30"]
+
+# sub_82249140, RANDOM's result (r30 side).
+[[entrypoint.midasm_hook]]
+address = 0x82249990
+name = "BurstLimitSlotsRandom"
+registers = ["r30"]
+
+# The select's drawing sub_822454D0, after the UI animations ran (bl
+# sub_82281260): r30 = the object. The page's own card / picture textures.
+[[entrypoint.midasm_hook]]
+address = 0x82245520
+name = "BurstLimitSlotsSelectDraw"
+registers = ["r30"]
+
+# sub_822454D0, lwzx r11,r11,r7: the colour behind the big picture (table
+# r7, offset r11, r9 = value * 4).
+[[entrypoint.midasm_hook]]
+address = 0x822455D8
+name = "BurstLimitSlotsTint"
+registers = ["r7", "r9", "r11"]
+
+# The Ultimate window sub_82234140, lhz r10,0(r11): r11 = the list, r29 =
+# the character, r31 = the side.
+[[entrypoint.midasm_hook]]
+address = 0x82234350
+name = "BurstLimitSlotsUltimates"
+registers = ["r11", "r29", "r31"]
+
+# ... after its lock loop (r19 = the side's block: +16..+18 locked, +19..+21
+# NEW): a slot's own list is all unlocked.
+[[entrypoint.midasm_hook]]
+address = 0x822343CC
+name = "BurstLimitSlotsUltimatesUnlock"
+registers = ["r19", "r31"]
+
+# ... after stw r3,0(r29) (entry r27's name): a slot.toml name.
+[[entrypoint.midasm_hook]]
+address = 0x82234444
+name = "BurstLimitSlotsUltimateName"
+registers = ["r27", "r29", "r31"]
+
 # --- Online (src/burstlimit_patches.cpp) ---
 
 # cmpwi cr6,r11,6 -> 2 while online_input_delay_test is on: resend unacked
@@ -427,3 +746,24 @@ registers = ["r26", "r29", "r30"]
 address = 0x820F8B54
 name = "BurstLimitButtonsTextureMade"
 registers = ["r28", "r31"]
+
+# --- Ranked Match / online leaderboard (src/burstlimit_ranked.cpp) ---
+# Versus results screen sub_8224C6C0, right after the winner is decided (r21 / r22 rounds won by
+# player 1 / 2, r23 the results object): report the online battle to the lobby.
+[[entrypoint.midasm_hook]]
+address = 0x8224CAE4
+name = "BurstLimitRankedResults"
+registers = ["r21", "r22", "r23"]
+
+# sub_82295DF8 (XUserReadStats of a joining player's record): r31 net manager, r28 the record.
+[[entrypoint.midasm_hook]]
+address = 0x82295E0C
+name = "BurstLimitRankedReadTarget"
+registers = ["r28", "r31"]
+
+# sub_822982B8 (host, after arbitration registration), before unregistered peers are dropped:
+# r30 = the peer record vector.
+[[entrypoint.midasm_hook]]
+address = 0x822983EC
+name = "BurstLimitRankedArbitration"
+registers = ["r30"]

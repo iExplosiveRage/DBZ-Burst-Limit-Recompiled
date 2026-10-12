@@ -697,3 +697,218 @@ void BurstLimitEncodeDxt5Block(const uint8_t pixels[16][4], uint8_t block[16]) {
     block[12 + k] = uint8_t(color_bits >> (8 * k));
   }
 }
+
+// ---------------------------------------------------------------- new names in a TOC
+
+namespace {
+
+void PutBe(uint8_t* p, uint64_t value, size_t size) {
+  for (size_t i = 0; i < size; ++i) {
+    p[size - 1 - i] = uint8_t(value >> (8 * i));
+  }
+}
+
+// An unencrypted @UTF table's parts (from the table's start: "@UTF", u32 size
+// less 8, then the rows, strings and data offsets less 8, the name's string,
+// u16 column count, u16 row length, u32 row count, the columns) and columns.
+struct UtfLayout {
+  struct Column {
+    std::string name;
+    uint8_t storage = 0;    // 0x10 none, 0x30 one value for all rows, 0x50 per row
+    uint8_t type = 0;
+    uint32_t position = 0;  // in a row, for per-row columns
+  };
+  uint64_t end = 0, rows = 0, strings = 0, data = 0;
+  uint16_t row_length = 0;
+  uint32_t row_count = 0;
+  std::vector<Column> columns;
+
+  bool Parse(const std::vector<uint8_t>& t, std::string& error) {
+    if (t.size() < 32 || std::memcmp(t.data(), "@UTF", 4) != 0) {
+      error = "not an unencrypted @UTF table";
+      return false;
+    }
+    end = uint64_t(Be32(&t[4])) + 8;
+    rows = uint64_t(Be32(&t[8])) + 8;
+    strings = uint64_t(Be32(&t[12])) + 8;
+    data = uint64_t(Be32(&t[16])) + 8;
+    const uint16_t column_count = Be16(&t[24]);
+    row_length = Be16(&t[26]);
+    row_count = Be32(&t[28]);
+    if (end > t.size() || rows > strings || strings > data || data > end ||
+        rows + uint64_t(row_count) * row_length != strings) {
+      error = "unexpected @UTF layout";
+      return false;
+    }
+    size_t pos = 32;
+    uint32_t row_position = 0;
+    for (uint16_t i = 0; i < column_count; ++i) {
+      if (pos + 5 > rows) {
+        error = "unexpected @UTF columns";
+        return false;
+      }
+      Column column;
+      column.storage = t[pos] & 0xF0;
+      column.type = t[pos] & 0x0F;
+      const uint64_t name = strings + Be32(&t[pos + 1]);
+      const auto name_end = name < data ? std::find(t.begin() + name, t.begin() + data, uint8_t(0))
+                                        : t.begin() + data;
+      if (name >= data || name_end == t.begin() + data) {
+        error = "unexpected @UTF column name";
+        return false;
+      }
+      column.name.assign(t.begin() + name, name_end);
+      pos += 5;
+      const size_t size = TypeSize(column.type);
+      if (!size) {
+        error = "unknown @UTF column type in " + column.name;
+        return false;
+      }
+      if (column.storage == 0x30) {
+        pos += size;
+      } else if (column.storage == 0x50) {
+        column.position = row_position;
+        row_position += uint32_t(size);
+      }
+      columns.push_back(std::move(column));
+    }
+    if (row_position != row_length || pos > rows) {
+      error = "unexpected @UTF row layout";
+      return false;
+    }
+    return true;
+  }
+
+  const Column* Find(std::string_view name) const {
+    for (const Column& column : columns) {
+      if (column.name == name) {
+        return &column;
+      }
+    }
+    return nullptr;
+  }
+};
+
+bool PerRowInt(const UtfLayout::Column* column) {
+  return column && column->storage == 0x50 && column->type >= 0x4 && column->type <= 0x7;
+}
+
+bool PutColumn(uint8_t* row, const UtfLayout::Column& column, uint64_t value) {
+  const size_t size = TypeSize(column.type);
+  if (size < 8 && (value >> (8 * size)) != 0) {
+    return false;
+  }
+  PutBe(row + column.position, value, size);
+  return true;
+}
+
+}  // namespace
+
+bool BurstLimitCpkAppendToc(const std::vector<uint8_t>& table, uint64_t base,
+                            const std::vector<BurstLimitCpkAddedFile>& files,
+                            std::vector<uint8_t>& out, std::string& error) {
+  UtfLayout utf;
+  if (!utf.Parse(table, error)) {
+    return false;
+  }
+  const UtfLayout::Column* dir = utf.Find("DirName");
+  const UtfLayout::Column* name = utf.Find("FileName");
+  const UtfLayout::Column* file_size = utf.Find("FileSize");
+  const UtfLayout::Column* extract_size = utf.Find("ExtractSize");
+  const UtfLayout::Column* file_offset = utf.Find("FileOffset");
+  const auto text = [](const UtfLayout::Column* column) {
+    return column && column->storage == 0x50 && column->type == 0xA;
+  };
+  if (!text(dir) || !text(name) || !PerRowInt(file_size) || !PerRowInt(extract_size) ||
+      !PerRowInt(file_offset)) {
+    error = "unexpected TOC columns";
+    return false;
+  }
+  // A per-row column this doesn't know (an ID, a checksum...) would need a
+  // value of its own in each new row.
+  for (const UtfLayout::Column& column : utf.columns) {
+    if (column.storage == 0x50 && &column != dir && &column != name && &column != file_size &&
+        &column != extract_size && &column != file_offset) {
+      error = "the TOC has a per-file column " + column.name;
+      return false;
+    }
+  }
+  // The new strings go after the table's own string pool (a folder used by
+  // several files is stored once); string offsets are from the pool's start.
+  std::vector<uint8_t> pool;
+  std::vector<std::pair<std::string, uint32_t>> stored;
+  const uint64_t pool_start = utf.data - utf.strings;
+  const auto add_string = [&](const std::string& value) -> uint64_t {
+    for (const auto& [text_value, offset] : stored) {
+      if (text_value == value) {
+        return offset;
+      }
+    }
+    const uint64_t offset = pool_start + pool.size();
+    pool.insert(pool.end(), value.begin(), value.end());
+    pool.push_back(0);
+    stored.emplace_back(value, uint32_t(offset));
+    return offset;
+  };
+  std::vector<uint8_t> rows(files.size() * utf.row_length, 0);
+  for (size_t i = 0; i < files.size(); ++i) {
+    const BurstLimitCpkAddedFile& file = files[i];
+    if (file.name.empty() || file.position < base) {
+      error = "bad new file " + file.directory + "/" + file.name;
+      return false;
+    }
+    uint8_t* row = &rows[i * utf.row_length];
+    if (!PutColumn(row, *dir, add_string(file.directory)) ||
+        !PutColumn(row, *name, add_string(file.name)) ||
+        !PutColumn(row, *file_size, file.size) || !PutColumn(row, *extract_size, file.size) ||
+        !PutColumn(row, *file_offset, file.position - base)) {
+      error = "new file " + file.directory + "/" + file.name + " is too large or too far";
+      return false;
+    }
+  }
+  // Header and columns, the rows, the new rows, the string pool, the new
+  // strings (to an 8-byte boundary, like the game's tables), the data pool.
+  out.clear();
+  out.reserve(table.size() + rows.size() + pool.size() + 8);
+  out.insert(out.end(), table.begin(), table.begin() + utf.strings);
+  out.insert(out.end(), rows.begin(), rows.end());
+  out.insert(out.end(), table.begin() + utf.strings, table.begin() + utf.data);
+  out.insert(out.end(), pool.begin(), pool.end());
+  while (out.size() % 8) {
+    out.push_back(0);
+  }
+  const uint64_t data = out.size();
+  out.insert(out.end(), table.begin() + utf.data, table.begin() + utf.end);
+  while (out.size() % 8) {
+    out.push_back(0);
+  }
+  if (out.size() > 0xFFFFFFFFull) {
+    error = "TOC too large";
+    return false;
+  }
+  PutBe(&out[4], out.size() - 8, 4);
+  PutBe(&out[12], utf.strings + rows.size() - 8, 4);
+  PutBe(&out[16], data - 8, 4);
+  PutBe(&out[28], uint64_t(utf.row_count) + files.size(), 4);
+  return true;
+}
+
+bool BurstLimitCpkSetToc(std::vector<uint8_t>& header, uint64_t toc_offset, uint64_t toc_size,
+                         std::string& error) {
+  UtfLayout utf;
+  if (!utf.Parse(header, error)) {
+    return false;
+  }
+  const UtfLayout::Column* offset = utf.Find("TocOffset");
+  const UtfLayout::Column* size = utf.Find("TocSize");
+  if (utf.row_count < 1 || !PerRowInt(offset) || !PerRowInt(size)) {
+    error = "unexpected CPK header columns";
+    return false;
+  }
+  uint8_t* row = &header[utf.rows];
+  if (!PutColumn(row, *offset, toc_offset) || !PutColumn(row, *size, toc_size)) {
+    error = "TOC position out of range";
+    return false;
+  }
+  return true;
+}

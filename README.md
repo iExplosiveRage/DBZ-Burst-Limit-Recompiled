@@ -50,7 +50,8 @@ normal Windows program instead of inside an emulator.
   (`present_letterbox`): black bars, or the picture stretched to fill the window (a 4:3 screen, say).
 - **Frame rate cap** (`frame_rate`): 30 (the original), 60, 120, 144 or unlocked, with fixes for pause, quitting
   a match and Training's "Reset Standing Position" above 30 FPS.
-- **Resolution and upscaling**: internal resolution up to 4K and beyond, changeable while playing; AMD FSR 1/2/3
+- **Resolution and upscaling**: internal resolution up to 4K and beyond, changeable while playing, or below 720p
+  for slow GPUs (**Lower resolution**: 960x540 / 640x360, about 1.5x / 2.9x the FPS on a weak integrated GPU); AMD FSR 1/2/3
   and CAS sharpening, FXAA, anisotropic filtering, and a **Texture detail** option (`texture_lod_bias`) for
   sharper textures in the distance.
 - **AMD FSR 4 / FSR 3.1.5** (`fsr_mode`, `fsr_sharpness`): AMD's anti-aliasing and upscaling for the 3D scene,
@@ -117,6 +118,12 @@ normal Windows program instead of inside an emulator.
   packs - no slow motion while the ping stays under the delay. The guest takes the host's online settings, every
   datagram is sent again a few ms later (`online_redundancy`), and a desync check compares the fight's state
   every frame. Rooms are only listed between identical builds.
+- **Ranked Match and online leaderboards** (since 0.5.0): the game's own Ranked Match with its Power Level and
+  Grade, kept by the lobby once both PCs report the same result, and the game's Leaderboard with each player's
+  battles, wins, losses and favourite character. See [Ranked Match](#ranked-match-and-leaderboards).
+- **Extra characters from mods** (`extra_characters`, since 0.5.0): a mod with a `slot.toml` adds a character on
+  a second page of the character select (**R2** / **L2**), with its own name, pictures, moves, voice and
+  ultimate names. Tools for making them: [DBZ Burst Limit ModKit](https://github.com/iExplosiveRage/DBZ-Burst-Limit-ModKit).
 - **Older online method over LAN / Radmin VPN**: Xbox LIVE sign-in, session create/search/join and player
   matches, emulated on top of plain UDP, with a configurable match driver step (`online_fast_tick`,
   `online_tick_sleep`): the game normally sends input in 12-frame batches (~1 second of input delay even on LAN).
@@ -342,6 +349,7 @@ settings menu (F1). Any setting can also be passed on the command line, e.g. `--
 | `discord_presence` | `true` | Show what you're playing on your Discord profile. |
 | `frame_rate` | *(empty)* | Frame rate cap: `30` (the original), `60`, `120`, `144` or `unlocked`. Empty = from `patch_60fps` and `vsync` (older settings). |
 | `draw_resolution_scale_x/y` | `1` | Internal resolution scale: `1` = 720p, `2` = 1440p, `3` = 4K (sharper, heavier). |
+| `draw_resolution_percent` | `100` | Below 720p for slow GPUs (**Lower resolution** in DISPLAY): with the scale at `1`, the game renders at this percent of 1280x720 (`75` = 960x540, `50` = 640x360, 25-100) and the picture is stretched to the window. Off while DLSS / AMD FSR scene modes are on. |
 | `present_effect` | `bilinear` | `bilinear` (off), `cas` (sharpening), `fsr`, `fsr2`, `fsr3` (AMD FSR upscaling). |
 | `present_fsr_quality_mode` | `auto` | How far below the resolution FSR renders: `auto` (native), `nativeaa`, `quality`, `balanced`, `performance`, `ultra_performance`. |
 | `field_of_view` | `100` | Field of view in percent of the original (50-200). |
@@ -361,6 +369,7 @@ settings menu (F1). Any setting can also be passed on the command line, e.g. `--
 | `start_forms` | `true` | RB / LB on the character select pick the start form. Online: the host's value is used by both. |
 | `story_costumes` | `true` | The four Z Chronicles costumes on the character select. |
 | `extra_stages` | `true` | The three Z Chronicles stages on the Versus / Training stage select (offline). |
+| `extra_characters` | `true` | Extra characters from mods (`slot.toml`): R2 on the Versus / Training character select shows them (offline). |
 | `ki_charge` | `false` | Hold L3 to charge Ki (Shin Budokai style). Online: the host's value is used by both. |
 | `ki_charge_rate` | `16` | Ki added per frame while charging (the gauge holds 3000). |
 | `mods_enabled` | `true` | Use the mods switched on in the Mods menu (`mods\mods.toml`). |
@@ -440,6 +449,19 @@ own `build<timestamp>` id. The override is a CMake cache value: pass it empty ag
 The lobby server is a Cloudflare Worker (WebSocket room list, signaling and TURN credentials); it only lists
 rooms and helps the PCs find each other - the match itself is peer-to-peer.
 
+### Ranked Match and leaderboards - since 0.5.0
+- **Ranked:** Versus -> Online Battle -> **Ranked Match**: one player creates a match, the other searches (Quick
+  Match or Custom Match). Rooms are offered closest Grade / Power Level first.
+- Power Level and Grade use the game's own formula (start 5000). A battle counts once **both** PCs report the same
+  result; if one player quits mid-battle, the one who stayed gets the win after 90 seconds. At most 10 rated
+  battles per pair of players per day (later ones still count as battles).
+- Player Match battles count too (battles, wins, losses, favourite character), without changing the Power Level.
+- **Leaderboard** (Versus -> Online Battle -> Ranked Match -> Leaderboard) shows the online players; next to each row: battles,
+  wins, losses and favourite character (`ranked_overlay`). The gamer card shows a player's record. The same
+  rankings are in the settings menu: F1 -> ONLINE -> **Online rankings**.
+- The first time you go online, the game gets an online identity from the lobby (saved as
+  `Documentsurstlimit\online_identity.json`, next to your saves). Keep that file to keep your record.
+
 ### Older method: Radmin VPN / LAN
 
 Still works, and doesn't use the lobby (`Host_Online.bat` / `Join_Online.bat` set `REX_XNET_IP`, which makes
@@ -490,6 +512,10 @@ mods/
 - The game's own files are never changed: the game reads a virtual copy of the archive with the mod files in it.
 - Online, the mods in use are part of the version string, so rooms only match players with the same mods.
 - Mods can't be changed during an online session.
+- A mod can also add an **extra character** with a `slot.toml` (the format is at the top of
+  `src/burstlimit_slots.cpp`): it plays as one of the game's characters with its own files (under new names, which
+  only the paths `slot.toml` names may add to the archive), and R2 on the Versus / Training character select shows
+  it. New names and extra characters change after a restart.
 
 ---
 
@@ -511,7 +537,8 @@ mods/
   not on a Linux machine yet. Wine's own Direct3D 12 (plain Wine without vkd3d-proton) isn't supported - use
   the Linux zip or Proton.
 - The start screen's Update button and the Discord status haven't been tested through Wine / Proton yet.
-- The Xbox LIVE friends list and leaderboards are not implemented.
+- The Xbox LIVE friends list is not implemented (Friend Rankings stay empty). The game's "Battle Records" ratios
+  are still the local ones. Extra characters (R2 page) are offline only for now.
 - Running two copies on one PC (local online test) can drop frames on slower machines.
 
 ---
@@ -527,6 +554,7 @@ mods/
 | `src/burstlimit_app.h`, `src/main.cpp` | Application entry point and the settings menu. |
 | `src/burstlimit_install.cpp` | First-start install from the `.iso` (XDVDFS read, US check, copy). |
 | `src/burstlimit_mods.cpp` | Mods menu, virtual archive with the mod files, PS3 -> Xbox 360 model conversion. |
+| `src/burstlimit_slots.cpp` | Extra characters from mods (`slot.toml`): the character select's R2 page and the fighter's own files. |
 | `src/burstlimit_kicharge.cpp` | Ki charge (hold L3). |
 | `src/burstlimit_branding.cpp` | "Online" instead of "Xbox LIVE" (text and title art). |
 | `src/burstlimit_saves.cpp` | Save export / import. |

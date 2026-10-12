@@ -16,13 +16,23 @@
 // loads with the change from its next load (one already loaded keeps its old
 // data until then).
 // (the game reads the archive's table of contents once, at boot).
+// A file whose path names no file of the archive but that the mod's slot.toml
+// names (an extra character's files, burstlimit_slots.cpp) is added to the
+// archive under that path, e.g. PAC\CMN\CH\BCGHL\BCGHLM0.AMB; any other
+// unknown file is ignored as before. The TOC with those names is what the
+// game reads at boot, so they change only when the game starts again. The
+// extra characters' select pictures (slot.toml's card / portrait) are
+// appended to the character select's textures (UICHS_TOP.NUT) as it's served.
 //
 // The archive itself is never changed: the guest is served a virtual
 // LONG2DATA_US.CPK (rex/filesystem/file_overlay.h) - the original bytes, with
 // the TOC rows of the replaced files (FileOffset, FileSize, ExtractSize)
 // pointing past the end of the original file, where the mod files follow
 // (stored uncompressed: FileSize == ExtractSize, aligned like the archive).
-// The ITOC (file sizes by ID) is left alone; the game opens its files by name.
+// The ITOC (file sizes by ID) is left alone; the game opens its files by name
+// (CRI's lookup, sub_824F05A0, goes through every row: the archive isn't
+// sorted). New names need rows of their own: the TOC with them appended is
+// served past the end too, and the header's TocOffset / TocSize name it.
 // When two mods replace the same file, the one later in the list (folder
 // names in alphabetical order) wins.
 //
@@ -87,6 +97,26 @@ REXCVAR_DEFINE_BOOL(mods_enabled, true, "Patches",
 
 // burstlimit_online.cpp: sets the online version again (the mods are part of it).
 void BurstLimitOnlineUpdateVersion(const std::string& mods);
+// burstlimit_slots.cpp: reads the slot.toml of these mod folders; `served`
+// says whether the archive (as the game will read it) has a file.
+void BurstLimitSlotsReload(const std::vector<std::filesystem::path>& folders,
+                           const std::function<bool(const std::string&)>& served);
+// burstlimit_slots.cpp: the archive paths a mod's slot.toml names (upper
+// case, '/'; "{C}" / "{M}" stand for a digit) and its other files (pictures,
+// relative to the mod folder, upper case).
+void BurstLimitSlotsDeclared(const std::filesystem::path& folder, std::vector<std::string>& archive,
+                             std::vector<std::string>& other);
+// burstlimit_slots.cpp: the character select's textures (UICHS_TOP.NUT) with
+// the extra characters' pictures appended, and what they're made from.
+bool BurstLimitSlotsSelectArt(const std::vector<uint8_t>& nut, std::vector<uint8_t>& out);
+std::string BurstLimitSlotsArtKey();
+std::vector<std::pair<int, int>> BurstLimitSlotsArtTextures();
+void BurstLimitSlotsSetArtTextures(const std::vector<std::pair<int, int>>& textures);
+// burstlimit_slots.cpp, with the slots just read: the files they make
+// themselves (their pictures for the screens after the picks), by new archive
+// name; `taken` says whether the archive or a mod has a name already.
+void BurstLimitSlotsMadeFiles(const std::function<bool(const std::string&)>& taken,
+                              std::map<std::string, std::vector<uint8_t>>& files);
 // burstlimit_buttons.cpp: the button icons of the controller in use.
 int BurstLimitButtonStyle();
 bool BurstLimitRestyleWindowIcon(int index, int style, BurstLimitTexture& image);
@@ -96,6 +126,11 @@ namespace {
 constexpr const char* kArchiveName = "LONG2DATA_US.CPK";
 constexpr const char* kListFile = "mods.toml";
 constexpr const char* kInfoFile = "mod.toml";
+// A mod's extra character slots (burstlimit_slots.cpp reads it).
+constexpr const char* kSlotFile = "slot.toml";
+// The character select's textures: the extra characters' pictures are
+// appended to it.
+constexpr const char* kSelectArtFile = "/FIX/UICHS_TOP.NUT";
 
 // ---------------------------------------------------------------- helpers
 
@@ -292,6 +327,13 @@ struct Archive {
   Column file_size, extract_size, file_offset;
   std::vector<std::string> paths;  // per row, upper case, '/'
   std::map<std::string, std::vector<uint32_t>> by_path, by_name;
+  // For new names: the archive header's @UTF table (after its 16-byte chunk
+  // header), the TOC's 16-byte chunk header, and the archive's top folders
+  // (PAC, SOUND).
+  static constexpr uint64_t kHeaderPosition = 16;
+  std::vector<uint8_t> header_table;
+  std::array<uint8_t, 16> toc_head{};
+  std::set<std::string> top_folders;
 
   static size_t TypeSize(uint8_t type) {
     switch (type) {
@@ -447,7 +489,12 @@ struct Archive {
     std::ifstream file(path, std::ios::binary);
     std::vector<uint8_t> bytes;
     Utf header;
-    if (!file || !ReadChunk(file, 0, "CPK ", bytes) || !header.Parse(std::move(bytes))) {
+    if (!file || !ReadChunk(file, 0, "CPK ", bytes)) {
+      error = "not a CPK archive it can read";
+      return false;
+    }
+    header_table = bytes;
+    if (!header.Parse(std::move(bytes))) {
       error = "not a CPK archive it can read";
       return false;
     }
@@ -466,6 +513,8 @@ struct Archive {
       error = "can't read the archive's TOC";
       return false;
     }
+    file.seekg(std::streamoff(toc_offset));
+    file.read(reinterpret_cast<char*>(toc_head.data()), std::streamsize(toc_head.size()));
     auto column = [&](const char* name, Column& out) {
       const Utf::Col* col = toc.Find(name);
       if (!col || col->storage != 0x50 || (col->type != 0x4 && col->type != 0x5 &&
@@ -496,15 +545,46 @@ struct Archive {
       paths[row] = Upper(dir.empty() ? name : dir + "/" + name);
       by_path[paths[row]].push_back(row);
       by_name[Upper(name)].push_back(row);
+      if (!dir.empty()) {
+        top_folders.insert(Upper(dir.substr(0, dir.find('/'))));
+      }
     }
     table = std::move(toc.data);
     return true;
   }
 
-  // The rows a mod file named `relative` (upper case, '/') replaces.
-  std::vector<uint32_t> Match(const std::string& relative) const {
-    // The whole path, or a tail of it starting at a folder (mods may keep the
-    // archive's folders under folders of their own).
+  // The archive path a mod file adds when it matches no game file: its path
+  // from the first folder that is one of the archive's top folders (PAC,
+  // SOUND), with at least one folder before the file name - e.g.
+  // PAC/CMN/CH/BCGHL/BCGHLM0.AMB. Printable ASCII only (the game asks in
+  // upper case ASCII). "" when it isn't one.
+  std::string NewName(const std::string& relative) const {
+    for (const char c : relative) {
+      if (c <= ' ' || c > '~') {
+        return {};
+      }
+    }
+    for (size_t start = 0; start < relative.size();) {
+      const size_t slash = relative.find('/', start);
+      if (slash == std::string::npos) {
+        break;
+      }
+      if (top_folders.count(relative.substr(start, slash - start))) {
+        const std::string name = relative.substr(start);
+        if (name.find("//") != std::string::npos || name.back() == '/') {
+          return {};
+        }
+        return name;
+      }
+      start = slash + 1;
+    }
+    return {};
+  }
+
+  // The rows a mod file named `relative` (upper case, '/') replaces by its
+  // path: the whole path, or a tail of it starting at a folder (mods may keep
+  // the archive's folders under folders of their own).
+  std::vector<uint32_t> MatchPath(const std::string& relative) const {
     for (size_t start = 0; start < relative.size();) {
       auto it = by_path.find(relative.substr(start));
       if (it != by_path.end()) {
@@ -516,6 +596,11 @@ struct Archive {
       }
       start = slash + 1;
     }
+    return {};
+  }
+
+  // ... or, failing that, by its file name alone (every file of that name).
+  std::vector<uint32_t> MatchName(const std::string& relative) const {
     const size_t slash = relative.rfind('/');
     auto it = by_name.find(slash == std::string::npos ? relative : relative.substr(slash + 1));
     return it != by_name.end() ? it->second : std::vector<uint32_t>{};
@@ -568,6 +653,7 @@ class ModdedArchive final : public rex::filesystem::FileOverlay {
     table_position_ = archive.table_position;
     table_ = archive.table;
     align_ = archive.align;
+    base_ = archive.base;
     size_ = original_size_;
     // The game (CRI's file system) takes the archive's size when it opens it
     // at boot and doesn't read past it, so mods switched on later need room
@@ -581,30 +667,22 @@ class ModdedArchive final : public rex::filesystem::FileOverlay {
   // after everything served so far, so data the game may still be reading
   // never moves) and every row mapped before but not now back at the
   // original file. Returns the rows whose TOC values changed.
+  //
+  // `added`: files under names the archive doesn't have (upper case, '/').
+  // They need rows of their own, and the TOC can't grow where it is (the
+  // ETOC follows it), so the TOC with those rows appended is served as one
+  // more piece past the archive's end and the header's TocOffset / TocSize
+  // point there (the game adds 0x800 to every FileOffset, wherever the TOC
+  // is). The game reads the TOC once, at boot, after the header: from the
+  // first read of the header on (frozen()) the added names stay as they are
+  // until the game restarts. With none added, the header and TOC are served
+  // as the archive has them.
   std::vector<uint32_t> Map(const Archive& archive,
-                            const std::map<uint32_t, std::shared_ptr<Piece>>& rows) {
+                            const std::map<uint32_t, std::shared_ptr<Piece>>& rows,
+                            const std::map<std::string, std::shared_ptr<Piece>>& added) {
     std::unique_lock<std::shared_mutex> lock(mutex_);
     for (const auto& [row, piece] : rows) {
-      if (piece->position) {
-        continue;
-      }
-      if (!piece->data && !piece->handle) {
-        piece->handle = rex::filesystem::FileHandle::OpenExisting(
-            piece->path, rex::filesystem::FileAccess::kFileReadData);
-        if (!piece->handle) {
-          REXLOG_ERROR("Mods: can't open {}", PathUtf8(piece->path));
-          continue;
-        }
-      }
-      const uint64_t position = (size_ + align_ - 1) / align_ * align_;
-      if (position + piece->size > reported_size_) {
-        REXLOG_ERROR("Mods: no room left for {} in the archive until the game restarts",
-                     PathUtf8(piece->path));
-        continue;
-      }
-      piece->position = position;
-      size_ = (piece->position + piece->size + align_ - 1) / align_ * align_;
-      pieces_.push_back(piece);
+      Place(piece);
     }
     std::set<uint32_t> touched;
     for (const auto& [row, piece] : mapped_) {
@@ -629,7 +707,63 @@ class ModdedArchive final : public rex::filesystem::FileOverlay {
       }
     }
     mapped_ = std::move(mapped);
+    if (!frozen_.load(std::memory_order_acquire)) {
+      MapAdded(archive, added);
+    } else {
+      const bool same =
+          added.size() == added_.size() &&
+          std::equal(added.begin(), added.end(), added_.begin(),
+                     [](const auto& a, const auto& b) { return a.first == b.first; });
+      if (!same) {
+        REXLOG_WARN("Mods: the new archive names change the next time the game starts (the "
+                    "game has read the archive's TOC); {} stay until then",
+                    added_.size());
+      }
+    }
     return changed;
+  }
+
+  // Whether the game has read the archive's header (and so its TOC).
+  bool frozen() const { return frozen_.load(std::memory_order_acquire); }
+
+  // The names added to the TOC, as the game has them (or will at boot).
+  std::set<std::string> added_names() const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    std::set<std::string> names;
+    for (const auto& [name, piece] : added_) {
+      names.insert(name);
+    }
+    return names;
+  }
+
+  // The same, with the hash of each one's contents.
+  std::map<std::string, uint64_t> added_hashes() const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    std::map<std::string, uint64_t> hashes;
+    for (const auto& [name, piece] : added_) {
+      hashes[name] = piece->hash;
+    }
+    return hashes;
+  }
+
+  // Where the TOC served is (0 = in place, unchanged) and its rows.
+  uint64_t toc_position() const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    return toc_piece_ ? toc_piece_->position : 0;
+  }
+
+  // The TOC's @UTF table as the game gets it (for finding its copy in guest
+  // memory: the start, and its size).
+  std::vector<uint8_t> served_table_head(size_t count, size_t& size) const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    if (toc_piece_ && toc_piece_->data && toc_piece_->data->size() > 16) {
+      const std::vector<uint8_t>& chunk = *toc_piece_->data;
+      size = chunk.size() - 16;
+      return std::vector<uint8_t>(chunk.begin() + 16,
+                                  chunk.begin() + 16 + std::min(count, size));
+    }
+    size = table_.size();
+    return std::vector<uint8_t>(table_.begin(), table_.begin() + std::min(count, table_.size()));
   }
 
   // The TOC row as the archive now has it.
@@ -660,19 +794,28 @@ class ModdedArchive final : public rex::filesystem::FileOverlay {
     length = size_t(std::min<uint64_t>(length, reported_size_ - offset));
     auto* out = static_cast<uint8_t*>(buffer);
     const uint64_t end = offset + length;
-    // The original file, with the patched TOC table over it.
+    // The game reads the header (then the TOC it names) once, at boot: from
+    // here on the names in the TOC are fixed.
+    if (offset < kHeaderArea && length) {
+      frozen_.store(true, std::memory_order_release);
+    }
+    // The original file, with the patched TOC table (and header) over it.
     if (offset < original_size_) {
       const size_t count = size_t(std::min<uint64_t>(end, original_size_) - offset);
       size_t read = 0;
       if (!original_->Read(size_t(offset), out, count, &read) || read != count) {
         return false;
       }
-      const uint64_t table_end = table_position_ + table_.size();
-      const uint64_t from = std::max(offset, table_position_);
-      const uint64_t to = std::min(offset + count, table_end);
-      if (from < to) {
-        std::memcpy(out + (from - offset), table_.data() + (from - table_position_),
-                    size_t(to - from));
+      const auto overlay = [&](uint64_t position, const std::vector<uint8_t>& bytes) {
+        const uint64_t from = std::max(offset, position);
+        const uint64_t to = std::min(offset + count, position + bytes.size());
+        if (from < to) {
+          std::memcpy(out + (from - offset), bytes.data() + (from - position), size_t(to - from));
+        }
+      };
+      overlay(table_position_, table_);
+      if (!header_.empty()) {
+        overlay(Archive::kHeaderPosition, header_);
       }
     }
     // The mod files after it (zeros between them).
@@ -704,16 +847,125 @@ class ModdedArchive final : public rex::filesystem::FileOverlay {
   }
 
  private:
+  // The game reads the archive's first 2048 bytes for its header.
+  static constexpr uint64_t kHeaderArea = 0x800;
+
+  // Gives a piece its place after everything served so far (once; it keeps
+  // it). False when it can't be served.
+  bool Place(const std::shared_ptr<Piece>& piece) {
+    if (piece->position) {
+      return true;
+    }
+    if (!piece->data && !piece->handle) {
+      piece->handle = rex::filesystem::FileHandle::OpenExisting(
+          piece->path, rex::filesystem::FileAccess::kFileReadData);
+      if (!piece->handle) {
+        REXLOG_ERROR("Mods: can't open {}", PathUtf8(piece->path));
+        return false;
+      }
+    }
+    const uint64_t position = (size_ + align_ - 1) / align_ * align_;
+    if (position + piece->size > reported_size_) {
+      REXLOG_ERROR("Mods: no room left for {} in the archive until the game restarts",
+                   PathUtf8(piece->path));
+      return false;
+    }
+    piece->position = position;
+    size_ = (piece->position + piece->size + align_ - 1) / align_ * align_;
+    pieces_.push_back(piece);
+    return true;
+  }
+
+  // Before the game has read the header: the files under new names, the TOC
+  // with their rows (made again each time, with the rows of the replaced
+  // files as they are now) and the header pointing at it. The same new names
+  // (the same files) as a TOC made before keep its place - switching other
+  // mods doesn't make the archive grow by a TOC each time.
+  void MapAdded(const Archive& archive,
+                const std::map<std::string, std::shared_ptr<Piece>>& added) {
+    added_.clear();
+    header_.clear();
+    toc_piece_.reset();
+    std::vector<BurstLimitCpkAddedFile> files;
+    std::map<std::string, std::shared_ptr<Piece>> served;
+    std::vector<std::pair<std::string, const Piece*>> key;
+    for (const auto& [name, piece] : added) {
+      const size_t slash = name.rfind('/');
+      if (slash == std::string::npos || !Place(piece)) {
+        continue;
+      }
+      BurstLimitCpkAddedFile file;
+      file.directory = name.substr(0, slash);
+      file.name = name.substr(slash + 1);
+      file.size = piece->size;
+      file.position = piece->position;
+      files.push_back(std::move(file));
+      served[name] = piece;
+      key.push_back({name, piece.get()});
+    }
+    if (files.empty()) {
+      return;
+    }
+    std::vector<uint8_t> toc;
+    std::string error;
+    if (!BurstLimitCpkAppendToc(table_, base_, files, toc, error)) {
+      REXLOG_ERROR("Mods: can't add names to the archive's TOC ({}) - {} new file(s) not served",
+                   error, files.size());
+      return;
+    }
+    // The archive's "TOC " chunk header with the new size (little-endian).
+    auto chunk = std::make_shared<std::vector<uint8_t>>(archive.toc_head.begin(),
+                                                        archive.toc_head.end());
+    for (int i = 0; i < 8; ++i) {
+      (*chunk)[8 + i] = uint8_t(uint64_t(toc.size()) >> (8 * i));
+    }
+    chunk->insert(chunk->end(), toc.begin(), toc.end());
+    std::shared_ptr<Piece> piece;
+    auto made = toc_pieces_.find(key);
+    if (made != toc_pieces_.end() && made->second->size == chunk->size()) {
+      // Served in the same place; the replaced files' rows may have changed.
+      piece = made->second;
+      piece->data = std::move(chunk);
+    } else {
+      piece = std::make_shared<Piece>();
+      piece->size = chunk->size();
+      piece->path = archive.path;  // for messages
+      piece->data = std::move(chunk);
+      if (!Place(piece)) {
+        return;
+      }
+      toc_pieces_[key] = piece;
+    }
+    std::vector<uint8_t> header = archive.header_table;
+    if (!BurstLimitCpkSetToc(header, piece->position, piece->size, error)) {
+      REXLOG_ERROR("Mods: can't point the archive's header at the new TOC ({}) - {} new file(s) "
+                   "not served",
+                   error, files.size());
+      return;
+    }
+    toc_piece_ = std::move(piece);
+    header_ = std::move(header);
+    added_ = std::move(served);
+  }
+
   mutable std::shared_mutex mutex_;
   std::unique_ptr<rex::filesystem::FileHandle> original_;
   uint64_t original_size_ = 0;
   uint64_t size_ = 0;           // the end of the data served
   uint64_t reported_size_ = 0;  // what the guest is told
   uint64_t align_ = 0x800;
+  uint64_t base_ = 0;           // FileOffset is from here
   uint64_t table_position_ = 0;
   std::vector<uint8_t> table_;
   std::vector<std::shared_ptr<Piece>> pieces_;
   std::map<uint32_t, std::shared_ptr<Piece>> mapped_;
+  // New names (none: header_ empty, the TOC served where it is).
+  std::map<std::string, std::shared_ptr<Piece>> added_;
+  std::shared_ptr<Piece> toc_piece_;
+  // Every TOC made, by its new names and their files (each keeps its place).
+  std::map<std::vector<std::pair<std::string, const Piece*>>, std::shared_ptr<Piece>> toc_pieces_;
+  std::vector<uint8_t> header_;  // the header's @UTF table, served at kHeaderPosition
+  std::atomic<bool> frozen_{false};
 };
 
 // ---------------------------------------------------------------- the mods
@@ -723,13 +975,16 @@ struct ModFile {
   std::string relative;  // as in the mod folder, '/'
   uint64_t size = 0;
   std::vector<uint32_t> rows;  // the archive's files it replaces
+  // Or, matching none, the name it adds to the archive (upper case, a full
+  // path such as PAC/CMN/CH/BCGHL/BCGHLM0.AMB; see Archive::NewName).
+  std::string added;
   bool ps3 = false;            // made for the PS3 version: converted as it loads
 };
 
 struct Mod {
   std::string folder;
   std::string name, author, version, description;
-  std::vector<ModFile> files;         // replacing game files
+  std::vector<ModFile> files;         // replacing game files, or adding new ones
   std::vector<std::string> unknown;   // matching no game file (ignored)
   bool loaded = false;  // on at this start: its files are in the game now
   bool saved = false;   // on in mods.toml
@@ -759,6 +1014,19 @@ struct ModsState {
   std::vector<uint32_t> pending_rows;
   uint32_t guest_toc = 0;
   bool guest_toc_missing = false;
+  // The mods whose slot.toml was read (before the game read the archive).
+  std::vector<std::string> slot_folders;
+  // The character select's textures with the extra characters' pictures, by
+  // TOC row: what they were made from, and the file served.
+  struct SelectArt {
+    std::string key;
+    std::shared_ptr<ModdedArchive::Piece> piece;
+    std::vector<std::pair<int, int>> textures;  // each slot's, in it
+  };
+  std::map<uint32_t, SelectArt> select_art;
+  // The files the extra characters make themselves, by new archive name, as
+  // served (made while the game hasn't read the archive yet, kept after).
+  std::map<std::string, std::shared_ptr<ModdedArchive::Piece>> slot_made;
 };
 
 ModsState& State() {
@@ -841,6 +1109,26 @@ void ScanMods(ModsState& state, const Archive* archive) {
     if (mod.name.empty()) {
       mod.name = DisplayName(mod.folder);
     }
+    // What its slot.toml names: the only paths that may be new archive
+    // names, and pictures the slots read themselves.
+    std::vector<std::string> declared, pictures;
+    BurstLimitSlotsDeclared(folder, declared, pictures);
+    const auto is_declared = [&declared](const std::string& name) {
+      return std::any_of(declared.begin(), declared.end(), [&name](const std::string& pattern) {
+        size_t i = 0, j = 0;
+        for (; i < pattern.size() && j < name.size(); ++j) {
+          if (pattern.compare(i, 3, "{C}") == 0 || pattern.compare(i, 3, "{M}") == 0) {
+            if (!std::isdigit(static_cast<unsigned char>(name[j]))) {
+              return false;
+            }
+            i += 3;
+          } else if (pattern[i++] != name[j]) {
+            return false;
+          }
+        }
+        return i == pattern.size() && j == name.size();
+      });
+    };
     std::vector<ModFile> files;
     for (auto it = std::filesystem::recursive_directory_iterator(folder, ec);
          !ec && it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
@@ -850,15 +1138,29 @@ void ScanMods(ModsState& state, const Archive* archive) {
       ModFile file;
       file.path = it->path();
       file.relative = PathUtf8(it->path().lexically_relative(folder));
-      if (Upper(file.relative) == Upper(kInfoFile)) {
+      if (Upper(file.relative) == Upper(kInfoFile) || Upper(file.relative) == Upper(kSlotFile)) {
         continue;
+      }
+      const std::string upper = Upper(file.relative);
+      if (std::find(pictures.begin(), pictures.end(), upper) != pictures.end()) {
+        continue;  // read by burstlimit_slots.cpp, not a game file
       }
       file.size = it->file_size(ec);
       file.ps3 = IsPs3ModelFile(file.path);
       if (archive) {
-        file.rows = archive->Match(Upper(file.relative));
+        // Its path in the archive; else, if the slot.toml names it, a new
+        // name; else (as for any mod) a file of the same name.
+        file.rows = archive->MatchPath(upper);
+        if (file.rows.empty()) {
+          const std::string name = archive->NewName(upper);
+          if (!name.empty() && is_declared(name)) {
+            file.added = name;
+          } else {
+            file.rows = archive->MatchName(upper);
+          }
+        }
       }
-      if (file.rows.empty()) {
+      if (file.rows.empty() && file.added.empty()) {
         mod.unknown.push_back(file.relative);
       } else {
         files.push_back(std::move(file));
@@ -889,8 +1191,26 @@ std::map<uint32_t, std::pair<size_t, size_t>> Winners(const ModsState& state,
   return winners;
 }
 
+// The same for new names (by name).
+std::map<std::string, std::pair<size_t, size_t>> AddedWinners(const ModsState& state,
+                                                              const std::vector<bool>& on) {
+  std::map<std::string, std::pair<size_t, size_t>> winners;
+  for (size_t m = 0; m < state.mods.size(); ++m) {
+    if (!on[m]) {
+      continue;
+    }
+    for (size_t f = 0; f < state.mods[m].files.size(); ++f) {
+      if (!state.mods[m].files[f].added.empty()) {
+        winners[state.mods[m].files[f].added] = {m, f};
+      }
+    }
+  }
+  return winners;
+}
+
 std::vector<Conflict> Conflicts(const ModsState& state, const std::vector<bool>& on) {
   std::map<uint32_t, std::vector<size_t>> users;
+  std::map<std::string, std::vector<size_t>> added_users;
   for (size_t m = 0; m < state.mods.size(); ++m) {
     if (!on[m]) {
       continue;
@@ -898,6 +1218,12 @@ std::vector<Conflict> Conflicts(const ModsState& state, const std::vector<bool>&
     for (const ModFile& file : state.mods[m].files) {
       for (uint32_t row : file.rows) {
         auto& list = users[row];
+        if (list.empty() || list.back() != m) {
+          list.push_back(m);
+        }
+      }
+      if (!file.added.empty()) {
+        auto& list = added_users[file.added];
         if (list.empty() || list.back() != m) {
           list.push_back(m);
         }
@@ -911,6 +1237,11 @@ std::vector<Conflict> Conflicts(const ModsState& state, const std::vector<bool>&
       conflict.file = row < state.archive_paths.size() ? state.archive_paths[row] : "?";
       conflict.mods = mods;
       conflicts.push_back(std::move(conflict));
+    }
+  }
+  for (const auto& [name, mods] : added_users) {
+    if (mods.size() > 1) {
+      conflicts.push_back({name, mods});
     }
   }
   return conflicts;
@@ -1310,6 +1641,71 @@ bool IsModsList(rex::memory::Memory* memory, uint32_t list) {
   return items && R32(memory, items) == kModsItem + 1;
 }
 
+// The character select's textures (UICHS_TOP.NUT) with the extra characters'
+// pictures appended (burstlimit_slots.cpp), served instead of the game's - or
+// of a mod's, which they're added to. Made again only when the slots, their
+// pictures or that file change (the archive keeps every file it served).
+// True when `rows` has it.
+bool AddSelectArt(ModsState& state, const Archive& archive,
+                  std::map<uint32_t, std::shared_ptr<ModdedArchive::Piece>>& rows) {
+  const std::string art = BurstLimitSlotsArtKey();
+  if (art.empty()) {
+    state.select_art.clear();
+    return false;
+  }
+  const std::string_view suffix = kSelectArtFile;
+  bool any = false;
+  for (uint32_t row = 0; row < archive.paths.size(); ++row) {
+    const std::string& path = archive.paths[row];
+    if (path.size() < suffix.size() ||
+        path.compare(path.size() - suffix.size(), suffix.size(), suffix) != 0) {
+      continue;
+    }
+    const auto replaced = rows.find(row);
+    const ModdedArchive::Piece* base = replaced != rows.end() ? replaced->second.get() : nullptr;
+    const std::string key =
+        art + (base ? PathUtf8(base->path) + "|" + std::to_string(base->hash) : "game");
+    ModsState::SelectArt& made = state.select_art[row];
+    if (made.key != key) {
+      made.key = key;
+      made.piece.reset();
+      std::vector<uint8_t> nut, out;
+      bool read = false;
+      if (base && base->data) {
+        nut = *base->data;
+        read = true;
+      } else if (base) {
+        read = ReadFile(base->path, nut);
+      } else {
+        read = BurstLimitReadGameFile(state.archive_path.parent_path().parent_path(), path, nut);
+      }
+      if (!read) {
+        REXLOG_ERROR("Mods: can't read {} to add the extra characters' select pictures", path);
+      } else if (BurstLimitSlotsSelectArt(nut, out)) {
+        auto piece = std::make_shared<ModdedArchive::Piece>();
+        piece->size = out.size();
+        piece->path = base ? base->path : state.archive_path;  // for messages
+        Fnv contents;
+        contents.Add(out.data(), out.size());
+        piece->hash = contents.hash;
+        piece->data = std::make_shared<const std::vector<uint8_t>>(std::move(out));
+        made.piece = std::move(piece);
+        made.textures = BurstLimitSlotsArtTextures();
+        REXLOG_INFO("Mods: {} served with the extra characters' select pictures ({} -> {} bytes)",
+                    path, nut.size(), made.piece->size);
+      }
+    } else if (made.piece) {
+      // The same pictures (the slots were read again): their textures again.
+      BurstLimitSlotsSetArtTextures(made.textures);
+    }
+    if (made.piece) {
+      rows[row] = made.piece;
+      any = true;
+    }
+  }
+  return any;
+}
+
 // The mods that are on (`on`), into the archive: each winning file becomes a
 // piece (made once and kept - PS3 files converted), the overlay maps the
 // rows, and the rows whose TOC values changed are queued for the copy of the
@@ -1325,7 +1721,8 @@ void MapMods(ModsState& state, const std::vector<bool>& on) {
   }
   std::map<uint32_t, std::shared_ptr<ModdedArchive::Piece>> rows;
   Fnv fnv;
-  for (const auto& [row, source] : Winners(state, on)) {
+  // A mod file as served (made once and kept).
+  const auto piece_of = [&state](const std::pair<size_t, size_t>& source) {
     const Mod& mod = state.mods[source.first];
     const ModFile& file = mod.files[source.second];
     const std::string key = mod.folder + "/" + file.relative;
@@ -1357,19 +1754,136 @@ void MapMods(ModsState& state, const std::vector<bool>& on) {
       }
       piece->hash = contents.hash;
     }
-    rows[row] = piece;
-    // The online tag: which archive file has which contents (as served).
+    return piece;
+  };
+  for (const auto& [row, source] : Winners(state, on)) {
+    rows[row] = piece_of(source);
+  }
+  // Files under names the archive doesn't have (new rows in the TOC): the
+  // mods', then the ones the extra characters make (as made at boot).
+  std::map<std::string, std::shared_ptr<ModdedArchive::Piece>> added;
+  for (const auto& [name, source] : AddedWinners(state, on)) {
+    added[name] = piece_of(source);
+  }
+  std::set<std::string> mod_added;
+  for (const auto& [name, piece] : added) {
+    mod_added.insert(name);
+  }
+  for (const auto& [name, piece] : state.slot_made) {
+    added.emplace(name, piece);
+  }
+  const bool frozen = state.overlay->frozen();
+  size_t changed_count = 0;
+  const auto map = [&] {
+    const std::vector<uint32_t> changed = state.overlay->Map(archive, rows, added);
+    changed_count += changed.size();
+    for (uint32_t row : changed) {
+      if (std::find(state.pending_rows.begin(), state.pending_rows.end(), row) ==
+          state.pending_rows.end()) {
+        state.pending_rows.push_back(row);
+      }
+    }
+  };
+  map();
+  for (Mod& mod : state.mods) {
+    mod.loaded = false;
+  }
+  for (size_t m = 0; m < state.mods.size(); ++m) {
+    state.mods[m].loaded = on[m] && !state.mods[m].files.empty();
+  }
+  // The extra character slots (slot.toml) of the mods in use: read while the
+  // game hasn't read the archive yet, like the new names their files use.
+  std::vector<std::string> slot_folders;
+  for (const Mod& mod : state.mods) {
+    std::error_code ec;
+    if (mod.loaded &&
+        std::filesystem::is_regular_file(state.directory / mod.folder / kSlotFile, ec)) {
+      slot_folders.push_back(mod.folder);
+    }
+  }
+  bool remap = false;
+  if (!frozen) {
+    state.slot_folders = slot_folders;
+    const std::set<std::string> names = state.overlay->added_names();
+    std::vector<std::filesystem::path> paths;
+    for (const std::string& folder : slot_folders) {
+      paths.push_back(state.directory / folder);
+    }
+    BurstLimitSlotsReload(paths, [&archive, &names](const std::string& path) {
+      const std::string name = Upper(path);
+      return archive.by_path.count(name) != 0 || names.count(name) != 0;
+    });
+    // The files they make themselves, under new names (a piece made before
+    // with the same contents is served again in its place).
+    std::map<std::string, std::vector<uint8_t>> made;
+    BurstLimitSlotsMadeFiles(
+        [&archive, &mod_added](const std::string& name) {
+          return archive.by_path.count(name) != 0 || mod_added.count(name) != 0;
+        },
+        made);
+    std::map<std::string, std::shared_ptr<ModdedArchive::Piece>> pieces;
+    for (auto& [name, data] : made) {
+      Fnv contents;
+      contents.Add(data.data(), data.size());
+      const auto before = state.slot_made.find(name);
+      if (before != state.slot_made.end() && before->second->hash == contents.hash &&
+          before->second->size == data.size()) {
+        pieces[name] = before->second;
+        continue;
+      }
+      auto piece = std::make_shared<ModdedArchive::Piece>();
+      piece->size = data.size();
+      piece->path = state.archive_path;  // for messages
+      piece->hash = contents.hash;
+      piece->data = std::make_shared<const std::vector<uint8_t>>(std::move(data));
+      pieces[name] = std::move(piece);
+    }
+    if (pieces != state.slot_made) {
+      for (const auto& [name, piece] : state.slot_made) {
+        if (mod_added.count(name) == 0) {
+          added.erase(name);
+        }
+      }
+      state.slot_made = std::move(pieces);
+      for (const auto& [name, piece] : state.slot_made) {
+        added.emplace(name, piece);
+      }
+      remap = true;
+    }
+  } else if (slot_folders != state.slot_folders) {
+    REXLOG_INFO("Slots: the extra characters of the mods switched now change the next time the "
+                "game starts");
+  }
+  // Their select pictures, appended to the character select's textures.
+  if (AddSelectArt(state, archive, rows)) {
+    remap = true;
+  }
+  if (remap) {
+    map();
+  }
+  // The online tag: which archive file has which contents (as served).
+  for (const auto& [row, piece] : rows) {
     fnv.Add(archive.paths[row]);
     fnv.Add(&piece->hash, sizeof(piece->hash));
   }
-  const std::vector<uint32_t> changed = state.overlay->Map(archive, rows);
-  for (uint32_t row : changed) {
-    if (std::find(state.pending_rows.begin(), state.pending_rows.end(), row) ==
-        state.pending_rows.end()) {
-      state.pending_rows.push_back(row);
+  // The new names as served (once the game has read the TOC, the ones it
+  // has until it restarts) are part of the online tag too.
+  const std::map<std::string, uint64_t> served_added = state.overlay->added_hashes();
+  for (const auto& [name, hash] : served_added) {
+    fnv.Add(name);
+    fnv.Add(&hash, sizeof(hash));
+  }
+  if (!frozen && !served_added.empty()) {
+    REXLOG_INFO("Mods: {} new archive name(s) added (the TOC is served at {:X})",
+                served_added.size(), state.overlay->toc_position());
+    for (const auto& [name, hash] : served_added) {
+      REXLOG_INFO("Mods:   new name {}", name);
+      if (name.size() > 56) {
+        REXLOG_WARN("Mods:   {} is longer than the 56 characters the game can ask for", name);
+      }
     }
   }
-  if (rows.empty()) {
+  if (rows.empty() && served_added.empty()) {
     state.online_tag.clear();
   } else {
     char tag[32];
@@ -1378,24 +1892,21 @@ void MapMods(ModsState& state, const std::vector<bool>& on) {
   }
   REXLOG_INFO("Mods: {} file(s) replaced, {} TOC row(s) changed; the game reads {} as {} "
               "bytes ({} on disk); online tag {}",
-              rows.size(), changed.size(), kArchiveName, state.overlay->data_size(), archive.size,
+              rows.size(), changed_count, kArchiveName, state.overlay->data_size(), archive.size,
               state.online_tag.empty() ? "(none)" : state.online_tag);
-  for (Mod& mod : state.mods) {
-    mod.loaded = false;
-  }
-  for (size_t m = 0; m < state.mods.size(); ++m) {
-    state.mods[m].loaded = on[m] && !state.mods[m].files.empty();
-  }
 }
 
 // The guest's copy of the archive's TOC (the @UTF table the game read at
-// boot and looks files up in): found once by its first bytes.
-uint32_t FindGuestToc(const Archive& archive) {
+// boot and looks files up in): found once by its first bytes - the table as
+// it was served (with new names, the one with their rows).
+uint32_t FindGuestToc(const ModdedArchive& overlay) {
   auto* memory = GuestMemory();
-  if (!memory || archive.table.size() < 64) {
+  size_t table_size = 0;
+  const std::vector<uint8_t> head = overlay.served_table_head(64, table_size);
+  if (!memory || head.size() < 64) {
     return 0;
   }
-  const uint8_t* want = archive.table.data();
+  const uint8_t* want = head.data();
   uint64_t address = 0x10000;
   while (address < 0x100000000ull) {
     auto* heap = memory->LookupHeap(uint32_t(address));
@@ -1411,10 +1922,10 @@ uint32_t FindGuestToc(const Archive& archive) {
     const uint64_t region_end = uint64_t(info.base_address) + info.region_size;
     if ((info.state & rex::memory::kMemoryAllocationCommit) &&
         (info.protect & rex::memory::kMemoryProtectRead) &&
-        region_end - address >= archive.table.size()) {
+        region_end - address >= table_size) {
       const uint8_t* host = memory->TranslateVirtual<const uint8_t*>(uint32_t(address));
       const size_t size = size_t(region_end - address);
-      for (size_t offset = 0; offset + archive.table.size() <= size; offset += 4) {
+      for (size_t offset = 0; offset + table_size <= size; offset += 4) {
         if (host[offset] == '@' && std::memcmp(host + offset, want, 64) == 0) {
           return uint32_t(address + offset);
         }
@@ -1442,7 +1953,7 @@ void BurstLimitModsPatchGuestToc() {
     return;
   }
   if (!state.guest_toc && !state.guest_toc_missing) {
-    state.guest_toc = FindGuestToc(*state.archive);
+    state.guest_toc = FindGuestToc(*state.overlay);
     state.guest_toc_missing = !state.guest_toc;
     if (state.guest_toc) {
       REXLOG_INFO("Mods: the game's copy of the TOC is at {:08X}", state.guest_toc);
@@ -1618,6 +2129,9 @@ void BurstLimitModsSetup(const std::filesystem::path& exe_directory,
       std::string targets;
       for (uint32_t row : file.rows) {
         targets += (targets.empty() ? "" : ", ") + archive.paths[row];
+      }
+      if (!file.added.empty()) {
+        targets = file.added + " (new name)";
       }
       REXLOG_INFO("Mods:     {} ({} bytes) -> {}", file.relative, file.size, targets);
     }
@@ -1983,9 +2497,14 @@ class ModsPanel final : public rex::ui::ImGuiDialog {
       REXLOG_ERROR("Mods menu: can't write {}", PathUtf8(state.directory / kListFile));
       return;
     }
+    // New file names can't be added to (or taken from) the archive the game
+    // has already read: those change after a restart.
+    bool restart = false;
     for (Mod& mod : state.mods) {
       if (mod.staged != mod.saved) {
         REXLOG_INFO("Mods menu: applied {} = {}", mod.folder, mod.staged ? "on" : "off");
+        restart |= std::any_of(mod.files.begin(), mod.files.end(),
+                               [](const ModFile& file) { return !file.added.empty(); });
       }
       mod.saved = mod.staged;
     }
@@ -2000,6 +2519,9 @@ class ModsPanel final : public rex::ui::ImGuiDialog {
       BurstLimitOnlineUpdateVersion(state.online_tag);
       message_ = "Applied. Files load with the change from their next load (the next "
                  "fight); what's loaded now stays until then.";
+      if (restart) {
+        message_ += " New files (and extra characters) change after a restart.";
+      }
     } else {
       message_ = "Saved. The changes load the next time the game starts (mods are off: "
                  "mods_enabled = false).";
@@ -2605,7 +3127,13 @@ class ModsPanel final : public rex::ui::ImGuiDialog {
           std::string details;
           if (!mod.description.empty()) details += mod.description + " ";
           if (!mod.author.empty()) details += "By " + mod.author + ". ";
-          details += std::to_string(mod.files.size()) + " game file(s)";
+          const size_t added = size_t(std::count_if(
+              mod.files.begin(), mod.files.end(),
+              [](const ModFile& file) { return !file.added.empty(); }));
+          details += std::to_string(mod.files.size() - added) + " game file(s)";
+          if (added) {
+            details += ", " + std::to_string(added) + " new file(s) (switched after a restart)";
+          }
           if (std::any_of(mod.files.begin(), mod.files.end(),
                           [](const ModFile& file) { return file.ps3; })) {
             details += ", made for PS3 (converted)";

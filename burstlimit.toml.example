@@ -11,6 +11,8 @@ gpu_allow_invalid_fetch_constants = true
 # Resolution scale (1 = native 720p, 2 = 1440p, 3 = 4K).
 draw_resolution_scale_x = 2
 draw_resolution_scale_y = 2
+# Slow GPU: with the scale at 1, render below 720p (percent of 1280x720: 75 = 960x540, 50 = 640x360).
+# draw_resolution_percent = 50
 
 # Frame rate cap: "30" (the original), "60", "120", "144" or "unlocked".
 frame_rate = "60"
