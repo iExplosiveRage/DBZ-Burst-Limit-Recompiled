@@ -17,6 +17,7 @@
 #include <rex/memory.h>
 #include <rex/memory/utils.h>
 #include <rex/net/session.h>
+#include <rex/ppc.h>
 #include <rex/ppc/context.h>
 #include <rex/runtime.h>
 
@@ -229,17 +230,48 @@ std::mutex g_patch_mutex;
 bool g_fps_cap_applied = false;
 // Frame interval 1 wanted (any frame rate but 30).
 std::atomic<bool> g_interval_one{false};
+// Guest vblank rate of the frame_rate setting (0 = as configured), and
+// whether it is the 30 FPS cap.
+std::atomic<double> g_frame_rate_vblank_hz{0.0};
+std::atomic<bool> g_frame_rate_30{false};
 
 void Apply60FpsDataPatch();
+
+// The 30 FPS cap is held to 30 everywhere offline. Online (a game session
+// open) the frame pacing stays as it was, so the online timing doesn't change.
+bool FrameRate30Strict() {
+  return g_frame_rate_30.load(std::memory_order_relaxed) && !rex::net::IsGameSessionOpen();
+}
+
+// With the 30 FPS cap the frame rate wasn't held to 30:
+// - The menus (and loading screens) ask for interval 1 themselves - they ran
+//   at 60 FPS on the Xbox 360 - so they ran at 60.
+// - In battles (interval 2) the game's timer (sub_82119D18) only waits until
+//   1.2 vblanks have passed and leaves the rest to the GPU flipping every
+//   second vblank; here a frame is shown at the next vblank, so frames came
+//   17 or 33 ms apart (~48 FPS).
+// A 30 Hz guest vblank holds both to 30 (frames still flip at the next
+// vblank). Offline only, see FrameRate30Strict.
+void UpdateGuestVblankRate() {
+  double hz = g_frame_rate_vblank_hz.load(std::memory_order_relaxed);
+  if (FrameRate30Strict()) {
+    hz = 30.0;
+  }
+  if (rex::graphics::GetGuestVblankRate() != hz) {
+    rex::graphics::SetGuestVblankRate(hz);
+  }
+}
 
 void ApplyFrameRate() {
   const std::string rate = REXCVAR_GET(frame_rate);
   if (rate.empty()) {
     // The older settings: patch_60fps, paced by vsync.
     g_interval_one.store(REXCVAR_GET(patch_60fps));
-    rex::graphics::SetGuestVblankRate(0.0);
+    g_frame_rate_30.store(false);
+    g_frame_rate_vblank_hz.store(0.0);
   } else {
     g_interval_one.store(rate != "30");
+    g_frame_rate_30.store(rate == "30");
     double vblank_rate = 60.0;
     if (rate == "120") {
       vblank_rate = 120.0;
@@ -248,9 +280,10 @@ void ApplyFrameRate() {
     } else if (rate == "unlocked") {
       vblank_rate = 1000.0;
     }
-    rex::graphics::SetGuestVblankRate(vblank_rate);
+    g_frame_rate_vblank_hz.store(vblank_rate);
   }
   Apply60FpsDataPatch();
+  UpdateGuestVblankRate();
 }
 
 void Apply60FpsDataPatch() {
@@ -358,6 +391,8 @@ void BurstLimit60FpsSkipTickGate(PPCCRRegister& cr6) {
   }
 }
 
+float BurstLimitWidescreenProjectionScaleX();  // burstlimit_widescreen.cpp
+
 namespace {
 
 // field_of_view widens a projection matrix the game built: x and y over
@@ -381,6 +416,36 @@ void WidenProjection(uint32_t matrix_address) {
   }
 }
 
+// Wider picture (aspect_ratio, burstlimit_widescreen.cpp), offline: the
+// game's own camera aspect ratio is made wider, so its projections (Hor+) and
+// the screen-space effects it computes from the same aspect - the back + B
+// aura dome's distortion strips - agree. (Only narrowing the projection
+// matrices left those effects at 16:9: the dome showed the scene repeated in
+// vertical slices.) The game's aspect as it set it, 0 before the first set.
+constexpr uint32_t kCameraSettingsAspect = 0x84140EE4;
+std::atomic<float> g_camera_aspect_original{0.0f};
+
+float CameraAspectFactor() {
+  const float scale_x = BurstLimitWidescreenProjectionScaleX();  // 1 online
+  return scale_x > 0.0f ? 1.0f / scale_x : 1.0f;
+}
+
+// Every frame: follows aspect_ratio changes (and online sessions) - the game
+// copies the settings into its camera each frame.
+void SyncCameraAspect() {
+  const float original = g_camera_aspect_original.load(std::memory_order_relaxed);
+  auto* runtime = rex::Runtime::instance();
+  auto* memory = runtime ? runtime->memory() : nullptr;
+  if (original <= 0.0f || !memory) {
+    return;
+  }
+  uint8_t* aspect = memory->TranslateVirtual<uint8_t*>(kCameraSettingsAspect);
+  const float wanted = original * CameraAspectFactor();
+  if (rex::memory::load_and_swap<float>(aspect) != wanted) {
+    rex::memory::store_and_swap<float>(aspect, wanted);
+  }
+}
+
 }  // namespace
 
 // The game builds its projections from the camera settings at 0x84140EE0
@@ -391,7 +456,13 @@ void WidenProjection(uint32_t matrix_address) {
 // - sub_82123FC0, the one the effects use to place themselves on the screen
 //   (flares, speed lines, the screen areas they distort), after it wrote the
 //   matrix at r30.
+void BurstLimitCameraAspect(PPCRegister& f1) {
+  g_camera_aspect_original.store(float(f1.f64), std::memory_order_relaxed);
+  f1.f64 = double(float(f1.f64) * CameraAspectFactor());
+}
+
 void BurstLimitSceneProjectionFov(PPCRegister& r4) {
+  SyncCameraAspect();
   // Every frame: online, the GPU scales the drawn scene (see WidenProjection).
   const int32_t percent = REXCVAR_GET(field_of_view);
   rex::graphics::SetSceneProjectionScale(
@@ -465,4 +536,95 @@ void BurstLimitPlayTime(PPCRegister& r31) {
     }
   }
   rex::memory::store_and_swap<uint32_t>(seconds, value);
+}
+
+// --- Frame pacing CPU use (GitHub issue #11) ---
+// Both replace the recompiled function of the same name (the generated ones
+// are weak aliases of __imp__sub_*), no manifest hook needed.
+
+namespace {
+
+// D3D's waits for the GPU (until it has read the command buffer up to a
+// point, for room in it, for a fence) call sub_820B10E8 in a loop, and it
+// spins 32 db16cyc per call. On the Xbox 360 that idles a hardware thread;
+// recompiled it kept one host core at 100% all the time, menus and battles
+// alike, because the GPU (the command processor) holds every frame until its
+// vblank and the render thread waits for it most of the frame. After a short
+// spin (short waits while the GPU is busy stay as quick as before) it sleeps
+// in steps of kGpuWaitSleepUs; the game checks its condition after each.
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
+
+constexpr int64_t kGpuWaitSpinUs = 200;
+constexpr int64_t kGpuWaitSleepUs = 250;
+
+struct GpuWaitState {
+  uint32_t wait = 0;   // guest address of the wait's state
+  uint32_t start = 0;  // its time base when the wait started (new wait)
+  int64_t since_us = 0;
+  int64_t last_us = 0;
+  HANDLE timer = nullptr;
+};
+thread_local GpuWaitState t_gpu_wait;
+
+int64_t NowUs() {
+  static const int64_t frequency = [] {
+    LARGE_INTEGER value;
+    QueryPerformanceFrequency(&value);
+    return int64_t(value.QuadPart);
+  }();
+  LARGE_INTEGER counter;
+  QueryPerformanceCounter(&counter);
+  return int64_t(counter.QuadPart / frequency * 1000000 +
+                 counter.QuadPart % frequency * 1000000 / frequency);
+}
+
+// A sleep shorter than the 1 ms of Sleep: a high resolution waitable timer
+// (Windows 10 1803+), else an ordinary one, else a yield.
+void SleepMicroseconds(GpuWaitState& state, int64_t microseconds) {
+  if (!state.timer) {
+    state.timer = CreateWaitableTimerExW(nullptr, nullptr,
+                                         CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+    if (!state.timer) {
+      state.timer = CreateWaitableTimerExW(nullptr, nullptr, 0, TIMER_ALL_ACCESS);
+    }
+  }
+  LARGE_INTEGER due;
+  due.QuadPart = -microseconds * 10;
+  if (state.timer && SetWaitableTimerEx(state.timer, &due, 0, nullptr, nullptr, nullptr, 0)) {
+    WaitForSingleObject(state.timer, INFINITE);
+  } else {
+    SwitchToThread();
+  }
+}
+
+}  // namespace
+
+REX_EXTERN(__imp__sub_820B10E8);
+extern "C" REX_FUNC(sub_820B10E8) {
+  // r3: the wait's state (+0 the D3D device, +20 mftb when it started).
+  const uint32_t wait = ctx.r3.u32;
+  const uint32_t start = rex::memory::load_and_swap<uint32_t>(base + wait + 20);
+  GpuWaitState& state = t_gpu_wait;
+  const int64_t now = NowUs();
+  if (state.wait != wait || state.start != start || now - state.last_us > 50000) {
+    state.wait = wait;
+    state.start = start;
+    state.since_us = now;
+  } else if (now - state.since_us >= kGpuWaitSpinUs) {
+    SleepMicroseconds(state, kGpuWaitSleepUs);
+  } else {
+    YieldProcessor();
+  }
+  state.last_us = NowUs();
+  __imp__sub_820B10E8(ctx, base);
+}
+
+// The game's frame timer, once per frame: also follows a game session
+// opening or closing.
+REX_EXTERN(__imp__sub_82119D18);
+extern "C" REX_FUNC(sub_82119D18) {
+  UpdateGuestVblankRate();
+  __imp__sub_82119D18(ctx, base);
 }

@@ -48,8 +48,17 @@ normal Windows program instead of inside an emulator.
 
 - **Window size** (`window_size`, when not fullscreen): 512x448 up to 2560x1440, and **Keep aspect ratio**
   (`present_letterbox`): black bars, or the picture stretched to fill the window (a 4:3 screen, say).
+- **Ultrawide** (**Aspect ratio**, `aspect_ratio`): 21:9, 32:9 or "fit the window / screen" (for example
+  3440x1440). The fights show more to the sides (the view is widened, not stretched or cut); the menus,
+  the movies and the pause menu stay 16:9 in the middle, and the battle HUD's life bars move out to the
+  screen's edges (**Wide HUD**, `widescreen_hud` = `edges` or `center`). The resolution grows with the
+  width, so it stays sharp; NVIDIA DLSS / AMD FSR still work.
 - **Frame rate cap** (`frame_rate`): 30 (the original), 60, 120, 144 or unlocked, with fixes for pause, quitting
   a match and Training's "Reset Standing Position" above 30 FPS.
+- **Low CPU use** (since 0.6.0): the game no longer keeps a CPU core busy waiting for the GPU, and the window is
+  painted once per game frame - about 5x less CPU at 60 FPS (from more than a whole core to a fifth to a third
+  of one). At 30 FPS the cap now holds everywhere offline (fights used to run at about 48 FPS); online timing is
+  unchanged.
 - **Resolution and upscaling**: internal resolution up to 4K and beyond, changeable while playing, or below 720p
   for slow GPUs (**Lower resolution**: 960x540 / 640x360, about 1.5x / 2.9x the FPS on a weak integrated GPU); AMD FSR 1/2/3
   and CAS sharpening, FXAA, anisotropic filtering, and a **Texture detail** option (`texture_lod_bias`) for
@@ -91,6 +100,8 @@ normal Windows program instead of inside an emulator.
   around (offline only). Keyboard: **Insert** and **Numpad 0**, both rebindable in the settings menu. For
   repeatable shots, the console commands `free_camera_where` (logs the current camera as a command) and
   `free_camera_pose <x> <y> <z> <yaw> <pitch> [fov] [roll]` (puts the camera there).
+- **HUD on / off** (`show_hud`, DISPLAY -> **HUD**): hides the fight's HUD (life and Ki gauges, portraits,
+  prompts) while you play, without the free camera. The pause menu still shows.
 - **Sharp Xbox Series, PlayStation and Nintendo Switch button icons** (`button_icons`): the game's small Xbox 360
   button prompts - menus, tutorials
   and the fight HUD's "press repeatedly" buttons, the settings and Mods menus - show the buttons of the
@@ -121,6 +132,10 @@ normal Windows program instead of inside an emulator.
 - **Ranked Match and online leaderboards** (since 0.5.0): the game's own Ranked Match with its Power Level and
   Grade, kept by the lobby once both PCs report the same result, and the game's Leaderboard with each player's
   battles, wins, losses and favourite character. See [Ranked Match](#ranked-match-and-leaderboards).
+- **Room rules for Player Match** (since 0.6.0): when a guest joins, the host picks each player's **Health**,
+  **Attack** and **Defense**, the **Time Limit**, the **Rounds** and the cut-scenes in a menu like offline
+  Versus' Player Settings; the guest sees them before the fight, and the room list and **View Battle Rules** show
+  them too. Ranked Match keeps the game's rules. See [Room rules](#room-rules-player-match---since-060).
 - **Extra characters from mods** (`extra_characters`, since 0.5.0): a mod with a `slot.toml` adds a character on
   a second page of the character select (**R2** / **L2**), with its own name, pictures, moves, voice and
   ultimate names. Tools for making them: [DBZ Burst Limit ModKit](https://github.com/iExplosiveRage/DBZ-Burst-Limit-ModKit).
@@ -344,11 +359,14 @@ settings menu (F1). Any setting can also be passed on the command line, e.g. `--
 | `start_screen` | `true` | The start screen before the game (Play, Mods, Settings, Update, who's online). |
 | `update_check_url` | *(GitHub releases)* | Where the start screen looks for a newer release (empty = never). |
 | `window_size` | *(empty)* | Window size when not fullscreen, e.g. `640x480` (empty = the default). |
-| `present_letterbox` | `true` | Keep the 16:9 picture with black bars (off = stretch it to fill the window). |
+| `present_letterbox` | `true` | Keep the picture's shape (16:9, or `aspect_ratio`) with black bars (off = stretch it to fill the window). |
+| `aspect_ratio` | `16:9` | Picture shape: `16:9` (the original), `21:9`, `32:9` or `auto` (the window's / screen's shape, at least 16:9). Wider = more of the fight to the sides; menus, movies and the HUD keep their shape. |
+| `widescreen_hud` | `edges` | With a wider `aspect_ratio`: `edges` = the battle HUD's sides (life bars, ki gauges) at the screen's edges, `center` = all of it in the middle 16:9. |
+| `show_hud` | `true` | The fight's HUD (life and Ki gauges, portraits, prompts); off hides it during play, the pause menu still shows. |
 | `menu_sounds` | `true` | The game's menu sounds on the start screen and in the settings menu. |
 | `discord_presence` | `true` | Show what you're playing on your Discord profile. |
 | `frame_rate` | *(empty)* | Frame rate cap: `30` (the original), `60`, `120`, `144` or `unlocked`. Empty = from `patch_60fps` and `vsync` (older settings). |
-| `draw_resolution_scale_x/y` | `1` | Internal resolution scale: `1` = 720p, `2` = 1440p, `3` = 4K (sharper, heavier). |
+| `draw_resolution_scale_x/y` | `1` | Internal resolution scale: `1` = 720p, `2` = 1440p, `3` = 4K (sharper, heavier). With a wider `aspect_ratio`, X is raised to match (set Y; the settings menu's **Resolution** does). |
 | `draw_resolution_percent` | `100` | Below 720p for slow GPUs (**Lower resolution** in DISPLAY): with the scale at `1`, the game renders at this percent of 1280x720 (`75` = 960x540, `50` = 640x360, 25-100) and the picture is stretched to the window. Off while DLSS / AMD FSR scene modes are on. |
 | `present_effect` | `bilinear` | `bilinear` (off), `cas` (sharpening), `fsr`, `fsr2`, `fsr3` (AMD FSR upscaling). |
 | `present_fsr_quality_mode` | `auto` | How far below the resolution FSR renders: `auto` (native), `nativeaa`, `quality`, `balanced`, `performance`, `ultra_performance`. |
@@ -383,6 +401,7 @@ settings menu (F1). Any setting can also be passed on the command line, e.g. `--
 | `online_mode` | `auto` | `auto`: the lobby when `online_lobby_url` is set and `REX_XNET_IP` / `REX_XNET_SEARCH_IP` are not (so `Host_Online.bat` / `Join_Online.bat` keep the old way); `lobby` / `direct` force one. |
 | `online_name` | *(empty)* | Your name in the lobby and in the game (max 15 printable ASCII characters). Empty = the Windows user name. |
 | `online_input_delay` | `4` | Lobby matches: input delay in frames (`2`-`8`), or `off` for the game's own timing (`online_tick_sleep`). The host's value is used by both players. |
+| `online_rules_host_health/attack/defense`, `online_rules_guest_health/attack/defense`, `online_rules_cutscenes` | `3` / `room` | Player Match rooms you host: the room rules you picked last (Health 1-8 bars, Attack and Defense 1-5, cut-scenes `room` / `on` / `off`), the menu's defaults for the next guest. |
 | `online_input_channel` | `true` | Lobby matches: send every frame's input right away (off = only the game's own 3-frame packs). |
 | `online_desync_check` | `true` | Lobby matches: compare the fight's state with the other PC every frame and log the first difference (`[OnlineDesync]`). |
 | `online_hold_freeze` | `false` | Online: while the fight waits for the other player's input (short waits only), also stop the effect and HUD timers. |
@@ -448,6 +467,15 @@ own `build<timestamp>` id. The override is a CMake cache value: pass it empty ag
 
 The lobby server is a Cloudflare Worker (WebSocket room list, signaling and TURN credentials); it only lists
 rooms and helps the PCs find each other - the match itself is peer-to-peer.
+
+### Room rules (Player Match) - since 0.6.0
+When a guest joins your Player Match room, you (the host) get a **Room Rules** menu: each player's **Health**
+(1-8 bars), **Attack** and **Defense** (1-5, 3 = normal), the **Time Limit**, the **Rounds** and the
+**Opening/Ending Cut-Scene**. The guest sees "The host is choosing the battle settings" and then the rules;
+the host's menu closes once the guest's game has them, so both PCs always fight with the same rules (they stay
+for Fight Again). The time and rounds start from the ones you picked in Create Match, and your choice is shown
+in the room list and in **View Battle Rules**. Your last choice is the default next time (`online_rules_*`).
+Ranked Match and the older Radmin VPN / LAN way keep the game's rules and show no menu. Both players need 0.6.0.
 
 ### Ranked Match and leaderboards - since 0.5.0
 - **Ranked:** Versus -> Online Battle -> **Ranked Match**: one player creates a match, the other searches (Quick
@@ -524,6 +552,8 @@ mods/
 - The lobby online is new (0.4.0): it was tested between two houses (4-6 ms ping, 15,000 desync checks without
   a difference), but some networks may still fail to connect, and desyncs are possible. Online through Wine /
   Proton hasn't been tested.
+- Ultrawide (`aspect_ratio` wider than 16:9): outside the fights, a few full-screen pictures (the character
+  select's backdrop and bands) are stretched to the width; the other menus and the movies stay 16:9.
 - AMD FSR 4 hasn't been tested on AMD hardware yet (FSR 3.1.5 was, on an NVIDIA GPU).
 - A wider field of view can show missing objects at the edges of the screen: the game doesn't draw what it
   doesn't expect to be seen.
@@ -549,7 +579,9 @@ mods/
 |---|---|
 | `burstlimit_manifest.toml` | Recompiler manifest: entry point, extra functions and mid-asm hooks (game patches). |
 | `src/burstlimit_patches.cpp` | Implementation of the game patches (frame rate, online latency, post effects, field of view). |
-| `src/burstlimit_camera.cpp` | Free camera / photo mode. |
+| `src/burstlimit_camera.cpp` | Free camera / photo mode, the HUD option. |
+| `src/burstlimit_widescreen.cpp` | Ultrawide / aspect ratio: the wider view and the 2D placement (HUD at the edges). |
+| `src/burstlimit_online_rules.cpp` | Player Match room rules: the host's menu, the guest's panel, View Battle Rules and the room list. |
 | `src/burstlimit_online.cpp`, `src/burstlimit_netinput.cpp` | Online: version string, synced settings, notices; per-frame input channel, exact input delay, desync check. |
 | `src/burstlimit_app.h`, `src/main.cpp` | Application entry point and the settings menu. |
 | `src/burstlimit_install.cpp` | First-start install from the `.iso` (XDVDFS read, US check, copy). |

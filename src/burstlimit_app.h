@@ -25,6 +25,11 @@ void BurstLimitBrandingSetup(const std::filesystem::path& game_data_root);
 void BurstLimitButtonsSetup(const std::filesystem::path& game_data_root);
 // burstlimit_online.cpp
 void BurstLimitOnlineSetup();
+// burstlimit_online_rules.cpp: the Player Match room rules menu (host) / panel (guest).
+std::unique_ptr<rex::ui::ImGuiDialog> BurstLimitCreateOnlineRules(
+    rex::ui::ImGuiDrawer* drawer, rex::ui::ImmediateDrawer* immediate_drawer,
+    const std::filesystem::path& game_data_root, const std::filesystem::path& config_path,
+    std::function<void(std::function<void()>)> defer);
 // burstlimit_saves.cpp
 void BurstLimitSavesSetup(const std::filesystem::path& exe_directory,
                           const std::filesystem::path& user_data_root);
@@ -99,6 +104,11 @@ class BurstlimitApp : public rex::ReXApp {
   void OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) override {
     start_form_tags_ = BurstLimitCreateStartFormTags(drawer, immediate_drawer(), game_data_root());
     online_notice_ = BurstLimitCreateOnlineNotice(drawer);
+    online_rules_ = BurstLimitCreateOnlineRules(
+        drawer, immediate_drawer(), game_data_root(), ExeDirectory() / L"burstlimit.toml",
+        [this](std::function<void()> function) {
+          app_context().CallInUIThreadDeferred(std::move(function));
+        });
     ranked_overlay_ = BurstLimitCreateRankedOverlay(drawer);
     mods_panel_ = BurstLimitCreateModsPanel(
         drawer, immediate_drawer(), game_data_root(),
@@ -179,6 +189,7 @@ class BurstlimitApp : public rex::ReXApp {
     rex::ui::UnregisterBind("bind_freeze_game");
     start_form_tags_.reset();
     online_notice_.reset();
+    online_rules_.reset();
     ranked_overlay_.reset();
     mods_panel_.reset();
     installer_.reset();
@@ -347,13 +358,33 @@ class BurstlimitApp : public rex::ReXApp {
     window_size.shown_if_values = {"false"};
     display.items.push_back(toggle(
         "Keep aspect ratio", "present_letterbox",
-        "On: black bars when the window or screen isn't 16:9. Off: the picture is stretched to "
-        "fill it (for example a 4:3 screen)."));
+        "On: black bars when the window or screen isn't the picture's shape (16:9, or the "
+        "Aspect ratio below). Off: the picture is stretched to fill it (for example a 4:3 "
+        "screen)."));
+    display.items.push_back(choice(
+        "Aspect ratio", "aspect_ratio",
+        {{"16:9", "16:9 (original)"}, {"21:9", "21:9 ultrawide"}, {"32:9", "32:9 super ultrawide"},
+         {"auto", "Fit the window / screen"}},
+        "The picture's shape. Wider ones show more of the fight to the sides (the view isn't "
+        "stretched or cut); the menus, the HUD and the movies keep their 16:9 shape. Fit the "
+        "window: as wide as the window or screen (at least 16:9)."));
+    Item& wide_hud = display.items.emplace_back(choice(
+        "Wide HUD", "widescreen_hud",
+        {{"edges", "Life bars at the edges"}, {"center", "All in the middle 16:9"}},
+        "Where the battle HUD goes in a wider picture."));
+    wide_hud.shown_if_cvar = "aspect_ratio";
+    wide_hud.shown_if_values = {"21:9", "32:9", "auto"};
+    display.items.push_back(toggle(
+        "HUD", "show_hud",
+        "Off hides the fight's HUD (life and Ki gauges, portraits, prompts) during play, like "
+        "the free camera does. The pause menu still shows."));
+    // Y: a wider picture raises the X scale with it (burstlimit_widescreen.cpp).
     Item& resolution = display.items.emplace_back(choice(
-        "Resolution", "draw_resolution_scale_x",
+        "Resolution", "draw_resolution_scale_y",
         {{"1", "1280x720"}, {"2", "2560x1440"}, {"3", "3840x2160 (4K)"}, {"4", "5120x2880"}},
-        "The resolution the game renders at. Higher is sharper but needs a faster GPU."));
-    resolution.mirrored_cvars = {"draw_resolution_scale_y", "resolution_scale"};
+        "The resolution the game renders at (its height - a wider picture renders wider too). "
+        "Higher is sharper but needs a faster GPU."));
+    resolution.mirrored_cvars = {"draw_resolution_scale_x", "resolution_scale"};
     // Below 1280x720 (draw_resolution_percent): only at the 1x Resolution.
     Item& low_resolution = display.items.emplace_back(choice(
         "Lower resolution", "draw_resolution_percent",
@@ -578,12 +609,10 @@ class BurstlimitApp : public rex::ReXApp {
          {"6", "6 frames"},
          {"8", "8 frames"},
          {"off", "Game default"}},
-        "Online matches (lobby): how many frames your button presses wait so both PCs stay in "
-        "step. Lower feels snappier; the fight only pauses when the ping is above it (one "
-        "frame = 17 ms: 2 frames ~ up to 25 ms ping one way, 4 frames ~ 55 ms, 6 frames ~ "
-        "90 ms, 8 frames ~ 120 ms). The host's choice is used by both players and it can't "
-        "change during a session. Game default brings back the older Online input speed "
-        "setting (used over Radmin / LAN)."));
+        "Online (lobby): how many frames your presses wait so both PCs stay in step. Lower "
+        "feels snappier; the fight only pauses when the ping is higher (2 frames ~ 25 ms one "
+        "way, 4 ~ 55 ms, 6 ~ 90 ms, 8 ~ 120 ms). The host's choice is used by both players. "
+        "Game default = the older Online input speed (Radmin / LAN)."));
     Item& online = online_section.items.emplace_back(choice(
         "Online input speed", "online_tick_sleep",
         {{"0", "LAN"}, {"1", "Fast"}, {"2", "Normal"}, {"3", "Game default"}},
@@ -639,6 +668,7 @@ class BurstlimitApp : public rex::ReXApp {
  private:
   std::unique_ptr<rex::ui::ImGuiDialog> start_form_tags_;
   std::unique_ptr<rex::ui::ImGuiDialog> online_notice_;
+  std::unique_ptr<rex::ui::ImGuiDialog> online_rules_;
   std::unique_ptr<rex::ui::ImGuiDialog> ranked_overlay_;
   std::unique_ptr<rex::ui::ImGuiDialog> mods_panel_;
   std::unique_ptr<rex::ui::ImGuiDialog> installer_;

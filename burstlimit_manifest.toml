@@ -110,6 +110,15 @@ address = 0x8212405C
 name = "BurstLimitProjectionFov"
 registers = ["r30"]
 
+# Camera settings setter sub_82123F28 (r3 FOV angle, f1 aspect, f2 near,
+# f3 far -> 0x84140EE0): a wider picture (aspect_ratio) gets the wider aspect
+# here, so every projection and the effects the game places on the screen use
+# the same one (src/burstlimit_patches.cpp).
+[[entrypoint.midasm_hook]]
+address = 0x82123F28
+name = "BurstLimitCameraAspect"
+registers = ["f1"]
+
 # --- Free camera (src/burstlimit_camera.cpp) ---
 
 # Main loop (sub_822197D0), once per game tick, right before the task
@@ -631,6 +640,37 @@ name = "BurstLimitOnlineHold"
 address = 0x82179E00
 name = "BurstLimitOnlineFightStartFrame"
 registers = ["r3", "cr6"]
+after_instruction = true
+
+# Player Match room rules (src/burstlimit_online_rules.cpp): the start of the battle
+# set-up sub_8217AEA8, before it reads the match request: both PCs write the
+# room's Health / Attack / Defense, time limit and cut-scenes into it.
+[[entrypoint.midasm_hook]]
+address = 0x8217AEB4
+name = "BurstLimitOnlineRulesBattleSetup"
+
+# sub_8226D250 draws the Session Lobby's Battle Rules (View Battle Rules) from
+# r4 = r31: +20 rounds - 1, +21 time limit index, +22 Drama Pieces: the agreed
+# room rules there (both PCs).
+[[entrypoint.midasm_hook]]
+address = 0x8226D25C
+name = "BurstLimitOnlineRulesView"
+registers = ["r31"]
+after_instruction = true
+
+# The Custom Match results list (sub_8226D690) picks each row's Time Limit text
+# from a 4-entry id table (r11 = index * 4): an infinite room (index 4) would
+# read the rounds table; it shows the game's "Random" text instead.
+[[entrypoint.midasm_hook]]
+address = 0x8226E304
+name = "BurstLimitOnlineRulesListTime"
+registers = ["r4", "r11"]
+after_instruction = true
+
+[[entrypoint.midasm_hook]]
+address = 0x8226F030
+name = "BurstLimitOnlineRulesListTime"
+registers = ["r4", "r11"]
 after_instruction = true
 
 # --- Mods menu (src/burstlimit_mods.cpp) ---

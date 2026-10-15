@@ -44,6 +44,11 @@ REXCVAR_DEFINE_BOOL(freeze_game, false, "Patches",
                     "free camera toggles it. Offline only.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
+REXCVAR_DEFINE_BOOL(show_hud, true, "Patches",
+                    "Shows the fight's HUD (life and Ki gauges, portraits, prompts). Off hides "
+                    "it during play like the free camera does; the pause menu still shows.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 namespace {
 
 // The camera manager is a static at 0x841B2B20 (pointed to by 0x841B2B10).
@@ -528,6 +533,22 @@ void BurstLimitCameraFrame(PPCRegister& r30) {
   }
   ApplyFreeze(memory);
   UpdateFreeCamera(memory);
+  // show_hud off: the free camera's HUD hiding during play, while the free
+  // camera isn't on (it has its own HUD toggle). Not while the fight is stopped
+  // (battle flags bit 0: the pause menu is drawn like the HUD).
+  if (!g_free_camera.active) {
+    bool hide = false;
+    if (!REXCVAR_GET(show_hud)) {
+      const uint32_t battle = rex::memory::load_and_swap<uint32_t>(
+          memory->TranslateVirtual<const uint8_t*>(kBattlePointer));
+      hide = battle && !(rex::memory::load_and_swap<uint32_t>(
+                             memory->TranslateVirtual<const uint8_t*>(battle + kBattleFlags)) &
+                         1);
+    }
+    if (rex::graphics::GetHideHudDraws() != hide) {
+      rex::graphics::SetHideHudDraws(hide);
+    }
+  }
   BurstLimitOnlineFrame(memory);
   BurstLimitButtonsFrame(memory);
   // After the update, so it shows a pose free_camera_pose has just posted.

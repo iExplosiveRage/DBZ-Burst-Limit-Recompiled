@@ -170,10 +170,16 @@ std::unique_ptr<rex::ui::ImGuiDialog> BurstLimitCreateOnlineNotice(rex::ui::ImGu
   return std::make_unique<OnlineNotice>(drawer);
 }
 
+// burstlimit_online_rules.cpp: the Player Match room rules' tick.
+void BurstLimitOnlineRulesFrame(rex::memory::Memory* memory);
+
 // Every game tick (BurstLimitCameraFrame): count the frames the online battle
 // is held waiting for input. One line every 10 s and a total per match.
 void BurstLimitOnlineFrame(rex::memory::Memory* memory) {
   StallCounter& s = g_stalls;
+  if (memory) {
+    BurstLimitOnlineRulesFrame(memory);
+  }
   if (!rex::net::IsGameSessionOpen() || !memory) {
     FlushStalls("session closed");
     if (memory) {

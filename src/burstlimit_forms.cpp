@@ -743,3 +743,8 @@ std::unique_ptr<rex::ui::ImGuiDialog> BurstLimitCreateStartFormTags(
     const std::filesystem::path& game_data_root) {
   return std::make_unique<StartFormTags>(drawer, immediate_drawer, game_data_root);
 }
+
+// Whether the character select is on screen (its logic ran in the last 300 ms).
+bool BurstLimitCharacterSelectActive() {
+  return NowMs() - g_select_seen_ms.load(std::memory_order_relaxed) < 300;
+}

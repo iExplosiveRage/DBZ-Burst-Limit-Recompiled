@@ -32,11 +32,13 @@ set(BURSTLIMIT_SOURCES
     src/burstlimit_mods.cpp
     src/burstlimit_netinput.cpp
     src/burstlimit_online.cpp
+    src/burstlimit_online_rules.cpp
     src/burstlimit_patches.cpp
     src/burstlimit_ranked.cpp
     src/burstlimit_saves.cpp
     src/burstlimit_slots.cpp
     src/burstlimit_stages.cpp
+    src/burstlimit_widescreen.cpp
 )
 
 if(WIN32)
