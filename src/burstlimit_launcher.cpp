@@ -1323,8 +1323,11 @@ REXCVAR_DEFINE_COMMAND(start_screen_play, PlayCommand, "Debug",
 REXCVAR_DEFINE_COMMAND_ARGS(start_screen_key, KeyCommand, "Debug",
                             "Start screen: up / down / a / b (for tests through the command pipe)");
 
+// burstlimit_quickfight.cpp: --quick_fight goes straight into a fight.
+bool BurstLimitQuickFightAtStartup();
+
 bool BurstLimitStartScreenEnabled() {
-  return REXCVAR_GET(start_screen);
+  return REXCVAR_GET(start_screen) && !BurstLimitQuickFightAtStartup();
 }
 
 std::unique_ptr<rex::ui::ImGuiDialog> BurstLimitCreateStartScreen(

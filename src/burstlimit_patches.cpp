@@ -14,12 +14,14 @@
 #include <rex/cvar.h>
 #include <rex/graphics/draw_overrides.h>
 #include <rex/graphics/frame_pacing.h>
+#include <rex/logging.h>
 #include <rex/memory.h>
 #include <rex/memory/utils.h>
 #include <rex/net/session.h>
 #include <rex/ppc.h>
 #include <rex/ppc/context.h>
 #include <rex/runtime.h>
+#include <rex/system/function_dispatcher.h>
 
 REXCVAR_DEFINE_BOOL(patch_60fps, false, "Patches",
                     "Enable the 60 FPS patch with pause and match-exit fixes (older setting, "
@@ -27,9 +29,9 @@ REXCVAR_DEFINE_BOOL(patch_60fps, false, "Patches",
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 REXCVAR_DEFINE_STRING(frame_rate, "", "Patches",
-                      "Frame rate cap: 30 (the original), 60, 120, 144 or unlocked. Empty = "
-                      "from patch_60fps and vsync.")
-    .allowed({"", "30", "60", "120", "144", "unlocked"})
+                      "Frame rate cap: 30 (the original), 60, 120, 144, display (the monitor's "
+                      "refresh rate) or unlocked. Empty = from patch_60fps and vsync.")
+    .allowed({"", "30", "60", "120", "144", "display", "unlocked"})
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 REXCVAR_DEFINE_BOOL(online_fast_tick, true, "Patches",
@@ -277,6 +279,10 @@ void ApplyFrameRate() {
       vblank_rate = 120.0;
     } else if (rate == "144") {
       vblank_rate = 144.0;
+    } else if (rate == "display") {
+      // The monitor's refresh rate, locked to its vblanks with present_vsync
+      // (SDK frame_pacing.h).
+      vblank_rate = rex::graphics::kGuestVblankRateDisplay;
     } else if (rate == "unlocked") {
       vblank_rate = 1000.0;
     }
@@ -627,4 +633,74 @@ REX_EXTERN(__imp__sub_82119D18);
 extern "C" REX_FUNC(sub_82119D18) {
   UpdateGuestVblankRate();
   __imp__sub_82119D18(ctx, base);
+}
+
+// --- Render command on a released texture (rare FATAL "Call to invalid
+// function 0x0", lr 0x820F6490, while a character select / battle loads) ---
+// The game's main thread records render commands (vtables 0x820829F0 and
+// 0x82082A0C, built by sub_820F6248 / sub_820F65E8) holding raw pointers to a
+// surface (+8) and a texture (+16) that it looked up by handle
+// (sub_820F37F8) without taking a reference; a job worker runs them later
+// (sub_820F0300 -> list sub_820F2618 -> slot 5 = sub_820F6428 / sub_820F6908).
+// The main thread frees textures from its deferred-delete queue
+// (sub_8210F810 -> sub_8210D468 / sub_8210D598 -> sub_820E57A0 ->
+// sub_820F4160 -> Release sub_820F39D0 -> sub_820EB2F8), which puts the
+// 320-byte block back on its pool's free list at once: the free-list link
+// overwrites the vtable pointer. If that happens before the worker runs a
+// command that still points at the texture, the command calls through the
+// link ([link + 44] = 0). A game race, seen in builds from July on; only its
+// timing differs between versions. A command whose surface or texture is no
+// longer a live object (vtable outside the image, or the method it calls not
+// a game function) is skipped: it would only draw into a texture that is gone.
+namespace {
+
+bool LiveGuestObject(uint8_t* base, uint32_t object, uint32_t slot_offset) {
+  if (object < 0x10000) {
+    return false;
+  }
+  const uint32_t vtable = rex::memory::load_and_swap<uint32_t>(base + object);
+  if (vtable < 0x82000000u || vtable >= 0x83000000u) {
+    return false;
+  }
+  const uint32_t method = rex::memory::load_and_swap<uint32_t>(base + vtable + slot_offset);
+  auto* runtime = rex::Runtime::instance();
+  auto* dispatcher = runtime ? runtime->function_dispatcher() : nullptr;
+  return method && (!dispatcher || dispatcher->GetFunction(method));
+}
+
+std::atomic<uint32_t> g_dead_render_commands{0};
+
+// The two command kinds that draw from a surface (+8) into a texture (+16).
+bool RenderCommandTargetsLive(uint8_t* base, uint32_t command) {
+  const uint32_t surface = rex::memory::load_and_swap<uint32_t>(base + command + 8);
+  const uint32_t texture = rex::memory::load_and_swap<uint32_t>(base + command + 16);
+  if (LiveGuestObject(base, surface, 40) && LiveGuestObject(base, texture, 44)) {
+    return true;
+  }
+  const uint32_t count = ++g_dead_render_commands;
+  if (count <= 8 || (count & (count - 1)) == 0) {
+    REXLOG_WARN("Render command {:08X} skipped: its surface {:08X} or texture {:08X} was released ({})",
+                command, surface, texture, count);
+  }
+  return false;
+}
+
+}  // namespace
+
+REX_EXTERN(__imp__sub_820F6428);
+extern "C" REX_FUNC(sub_820F6428) {
+  if (!RenderCommandTargetsLive(base, ctx.r3.u32)) {
+    ctx.r3.u64 = 0;
+    return;
+  }
+  __imp__sub_820F6428(ctx, base);
+}
+
+REX_EXTERN(__imp__sub_820F6908);
+extern "C" REX_FUNC(sub_820F6908) {
+  if (!RenderCommandTargetsLive(base, ctx.r3.u32)) {
+    ctx.r3.u64 = 0;
+    return;
+  }
+  __imp__sub_820F6908(ctx, base);
 }

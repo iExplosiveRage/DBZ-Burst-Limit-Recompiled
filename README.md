@@ -53,8 +53,13 @@ normal Windows program instead of inside an emulator.
   the movies and the pause menu stay 16:9 in the middle, and the battle HUD's life bars move out to the
   screen's edges (**Wide HUD**, `widescreen_hud` = `edges` or `center`). The resolution grows with the
   width, so it stays sharp; NVIDIA DLSS / AMD FSR still work.
-- **Frame rate cap** (`frame_rate`): 30 (the original), 60, 120, 144 or unlocked, with fixes for pause, quitting
-  a match and Training's "Reset Standing Position" above 30 FPS.
+- **Frame rate cap** (`frame_rate`): 30 (the original), 60, 120, 144, **Monitor refresh rate** (`display`) or
+  unlocked, with fixes for pause, quitting a match and Training's "Reset Standing Position" above 30 FPS.
+- **Even frame pacing and VSync** (`present_vsync`, on by default, since 0.6.1, #14): each frame is shown whole,
+  one per monitor refresh, and offline a frame rate the refresh rate is a multiple of (60 on a 60 / 120 / 240 Hz
+  monitor, 144 on 144 Hz, or **Monitor refresh rate**) is locked to the monitor's refreshes instead of a timer of
+  its own - no more skipped and doubled frames ("judder") at a steady 60 FPS. Online timing is unchanged.
+  G-Sync / FreeSync still work; off = frames are shown at once (tearing allowed).
 - **Low CPU use** (since 0.6.0): the game no longer keeps a CPU core busy waiting for the GPU, and the window is
   painted once per game frame - about 5x less CPU at 60 FPS (from more than a whole core to a fifth to a third
   of one). At 30 FPS the cap now holds everywhere offline (fights used to run at about 48 FPS); online timing is
@@ -109,7 +114,10 @@ normal Windows program instead of inside an emulator.
   the Xbox 360 pad of Control Settings and the tutorial becomes an Xbox Series controller, a DualSense or a pair
   of Joy-Cons. **Auto**
   follows the controller you play with; Settings > Game > Button icons picks one.
-- **FPS panel** (F3): frame rate, frame time graph, render resolution and upscaler, in any corner.
+- **FPS panel** (F3): frame rate, frame time graph, render resolution and upscaler, in any corner. Since 0.6.1
+  the FPS, its **1% low** and the graph are measured from the real presents to the screen (what RTSS /
+  PresentMon see), so uneven presentation shows even when the game's own frames are even. The `perf_report`
+  console command adds present times and the game frame -> screen latency.
 - **Mods menu** (`mods_enabled`): a **Mods** entry in the main menu, under Options, in the game's own style and
   sounds (and on the start screen). A mod is a folder in `mods\` next to `burstlimit.exe` with replacement game files named like the files
   in `LONG2DATA_US.CPK` (for example `BCGOK002.NUX`); PlayStation 3 model mods are converted on the fly. Switches
@@ -148,7 +156,16 @@ normal Windows program instead of inside an emulator.
   original texture for a moment while it's decoded and its upload prepared in the background
   (`texture_replace_async`) - with a large DDS pack the worst hitch went from 1.7 s to 0.07 s, about the same as
   without a pack. Small packs are also decoded at startup; bigger ones (over `texture_replace_ram_mb`) load as
-  they're used, and the least recently used ones leave RAM.
+  they're used, and the least recently used ones leave RAM (also for the background loads, since 0.6.1).
+  Since 0.6.1: packs saved with **premultiplied alpha** (some upscaling tools export them that way) are found
+  and converted (`texture_replace_alpha`, `auto` by default) - before, their soft edges, glows, skies and decals
+  came out dark; images over 8192 pixels are scaled down to fit; a replacement keeps the game's own number of
+  mip levels (at its scale), and anisotropic filtering applies to replacements of textures the game made
+  without mips; and replacements of textures the game reads in a different colour order show the right
+  colours (the title screen's Goku / Vegeta art was blue with some packs).
+- **Crash fix** (since 0.6.1): a rare crash while a character select or a fight loads ("Call to invalid
+  function 0x0") - a race in the game itself, where a render command could still point at a texture the game
+  had just freed. Such commands are now skipped.
 - **Play time fix**: the game counts play time in presented frames, so above 60 FPS it ran fast; it counts real
   time now.
 - **Discord status** (`discord_presence`): your Discord profile shows that you're playing and what - the menus,
@@ -365,7 +382,8 @@ settings menu (F1). Any setting can also be passed on the command line, e.g. `--
 | `show_hud` | `true` | The fight's HUD (life and Ki gauges, portraits, prompts); off hides it during play, the pause menu still shows. |
 | `menu_sounds` | `true` | The game's menu sounds on the start screen and in the settings menu. |
 | `discord_presence` | `true` | Show what you're playing on your Discord profile. |
-| `frame_rate` | *(empty)* | Frame rate cap: `30` (the original), `60`, `120`, `144` or `unlocked`. Empty = from `patch_60fps` and `vsync` (older settings). |
+| `frame_rate` | *(empty)* | Frame rate cap: `30` (the original), `60`, `120`, `144`, `display` (the monitor's refresh rate) or `unlocked`. Empty = from `patch_60fps` and `vsync` (older settings). |
+| `present_vsync` | `true` | VSync: each frame is shown whole from the monitor's next refresh, one per refresh, and a frame rate the refresh rate is a multiple of (60 on 60/120/240 Hz, 144 on 144 Hz, `display`) is locked to the monitor - even motion. G-Sync / FreeSync still work. `false` = present at once, tearing allowed. |
 | `draw_resolution_scale_x/y` | `1` | Internal resolution scale: `1` = 720p, `2` = 1440p, `3` = 4K (sharper, heavier). With a wider `aspect_ratio`, X is raised to match (set Y; the settings menu's **Resolution** does). |
 | `draw_resolution_percent` | `100` | Below 720p for slow GPUs (**Lower resolution** in DISPLAY): with the scale at `1`, the game renders at this percent of 1280x720 (`75` = 960x540, `50` = 640x360, 25-100) and the picture is stretched to the window. Off while DLSS / AMD FSR scene modes are on. |
 | `present_effect` | `bilinear` | `bilinear` (off), `cas` (sharpening), `fsr`, `fsr2`, `fsr3` (AMD FSR upscaling). |
@@ -394,7 +412,7 @@ settings menu (F1). Any setting can also be passed on the command line, e.g. `--
 | `online_branding` | `true` | "Online" instead of "Xbox LIVE" in the menus and the Online Battle title. |
 | `button_icons` | `auto` | Button icons in the game's prompts: `auto` (the controller in use; Xbox for the keyboard or an unknown pad), `xbox` (Xbox Series), `playstation` or `switch`. |
 | `quick_menu_buttons` | `back+start` | Controller buttons for the settings menu: `back+start`, `l3+r3` or `none` (F1 always works). |
-| `debug_overlay` | `false` | FPS panel (F3). |
+| `debug_overlay` | `false` | FPS panel (F3): FPS and 1% low of the real presents, frame time graph, render resolution, upscaler. |
 | `debug_overlay_position` | `top-left` | `top-left`, `top-right`, `bottom-left` or `bottom-right`. |
 | `patch_60fps` | `false` | Older 60 FPS setting, only used while `frame_rate` is empty. |
 | `online_lobby_url` | *(empty)* | Lobby server WebSocket URL (`wss://.../v1/ws`). The release `burstlimit.toml` sets it to the project's lobby. Empty = LAN / Radmin VPN only. |
@@ -419,6 +437,7 @@ settings menu (F1). Any setting can also be passed on the command line, e.g. `--
 | `texture_replace_enabled` | `false` | Load replacements from `textures/replace` (next to the exe). |
 | `texture_replace_async` | `true` | Never wait for a replacement to decode: the original texture shows until it's ready (no stutter). |
 | `texture_replace_preload` | `true` | Decode all the replacements in the background at startup, so they don't stutter the game when first used (keeps them in RAM; skipped for packs bigger than `texture_replace_ram_mb`). |
+| `texture_replace_alpha` | `auto` | How the pack's images store transparency: `auto` (each image is compared with the game's texture it replaces; without one, a sample of the pack decides), `straight` (like the game's own textures) or `premultiplied` (converted to straight when loaded). Wrong = dark soft edges, glows, skies and decals. |
 | `texture_replace_ram_mb` | `3072` | RAM for decoded replacements; past it the least recently used ones are dropped. Raise it for big packs if you have the RAM (e.g. `12288` with 32 GB). |
 | `texture_folder` | *(exe folder)/textures* | Override the textures folder. |
 | `log_level` | `info` | `debug` / `info` / `warning` / `error`. |
@@ -590,6 +609,7 @@ mods/
 | `src/burstlimit_kicharge.cpp` | Ki charge (hold L3). |
 | `src/burstlimit_branding.cpp` | "Online" instead of "Xbox LIVE" (text and title art). |
 | `src/burstlimit_saves.cpp` | Save export / import. |
+| `src/burstlimit_quickfight.cpp` | Debug / automated tests only: `--quick_fight=<spec>` (or the console command `quick_fight_now <spec>`) goes straight into a Training or Versus fight, e.g. `--quick_fight=training,goku:ssj,krillin,plains`. Does nothing unless it's used. |
 | `src/burstlimit_buttons.cpp` | PlayStation / Switch button icons, drawn into the game's textures as they load (`burstlimit_button_icons.inc`: the icons, made by `scripts/make_button_icons.py`). |
 | `res/` | Application icon (embedded into the exe). |
 | `generated/rexglue.cmake` | ReXGlue build glue. `generated/default/` is produced by the build. |

@@ -400,9 +400,17 @@ class BurstlimitApp : public rex::ReXApp {
          {"60", "60 FPS"},
          {"120", "120 FPS"},
          {"144", "144 FPS"},
+         {"display", "Monitor refresh rate"},
          {"unlocked", "Unlocked"}},
         "The most frames per second the game runs at. 30 is the original. Above 60 needs a "
-        "monitor with a high refresh rate to see the difference."));
+        "monitor with a high refresh rate to see the difference. For the smoothest motion pick "
+        "your monitor's refresh rate (or a half of it), or 'Monitor refresh rate'."));
+    display.items.push_back(toggle(
+        "VSync", "present_vsync",
+        "On: every frame is shown whole from the monitor's next refresh, one per refresh, and a "
+        "frame rate that fits the refresh rate is locked to it - even motion, no tearing "
+        "(G-Sync / FreeSync still work). Off: frames are shown at once (a little less "
+        "latency, tearing)."));
     display.items.push_back(toggle(
         "Show FPS", "debug_overlay",
         "Frame rate, frame time, render resolution and upscaler in a corner (F3)."));

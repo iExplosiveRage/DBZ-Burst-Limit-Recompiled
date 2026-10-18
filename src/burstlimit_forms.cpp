@@ -748,3 +748,22 @@ std::unique_ptr<rex::ui::ImGuiDialog> BurstLimitCreateStartFormTags(
 bool BurstLimitCharacterSelectActive() {
   return NowMs() - g_select_seen_ms.load(std::memory_order_relaxed) < 300;
 }
+
+// For burstlimit_quickfight.cpp: a character's forms, and the start form of a
+// side as if RB / LB had picked it on the character select.
+int BurstLimitFormCount(uint32_t character) {
+  return FormCount(character);
+}
+
+const char* BurstLimitFormName(uint32_t character, int form) {
+  return (form >= 0 && form < FormCount(character)) ? kForms[character][form] : nullptr;
+}
+
+void BurstLimitSetStartForm(uint32_t side, uint32_t character, int form) {
+  if (side > 1 || character >= kCharacterCount) {
+    return;
+  }
+  const int count = FormCount(character);
+  form = std::clamp(form, 0, std::max(count - 1, 0));
+  g_forms[side][character].store(uint8_t(form), std::memory_order_relaxed);
+}

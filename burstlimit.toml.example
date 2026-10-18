@@ -14,8 +14,12 @@ draw_resolution_scale_y = 2
 # Slow GPU: with the scale at 1, render below 720p (percent of 1280x720: 75 = 960x540, 50 = 640x360).
 # draw_resolution_percent = 50
 
-# Frame rate cap: "30" (the original), "60", "120", "144" or "unlocked".
+# Frame rate cap: "30" (the original), "60", "120", "144", "display" (your monitor's refresh
+# rate) or "unlocked". Smoothest: your monitor's refresh rate or half of it (60 on a 120 Hz monitor).
 frame_rate = "60"
+# VSync: one whole frame per monitor refresh, locked to the monitor (even motion, no tearing;
+# G-Sync / FreeSync still work). false = show frames at once (tearing).
+present_vsync = true
 
 # Online play without a VPN (see README "Online play"): rooms show up in
 # Versus > Xbox LIVE Battle > Player Match. Empty online_lobby_url = LAN / Radmin VPN only
