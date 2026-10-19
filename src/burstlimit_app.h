@@ -19,6 +19,7 @@
 
 // burstlimit_patches.cpp
 void BurstLimitApplyPostEffectSettings();
+void BurstLimitGraphicsPresetReady();
 // burstlimit_branding.cpp
 void BurstLimitBrandingSetup(const std::filesystem::path& game_data_root);
 // burstlimit_buttons.cpp
@@ -102,6 +103,7 @@ class BurstlimitApp : public rex::ReXApp {
   // The start form tags of the character select (burstlimit_forms.cpp), and
   // the keyboard keys for the free camera (rebindable in the settings menu).
   void OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) override {
+    BurstLimitGraphicsPresetReady();
     start_form_tags_ = BurstLimitCreateStartFormTags(drawer, immediate_drawer(), game_data_root());
     online_notice_ = BurstLimitCreateOnlineNotice(drawer);
     online_rules_ = BurstLimitCreateOnlineRules(
@@ -378,6 +380,15 @@ class BurstlimitApp : public rex::ReXApp {
         "HUD", "show_hud",
         "Off hides the fight's HUD (life and Ki gauges, portraits, prompts) during play, like "
         "the free camera does. The pause menu still shows."));
+    display.items.push_back(choice(
+        "Graphics preset", "graphics_preset",
+        {{"custom", "Custom"},
+         {"low_end", "Low-end PC (960x540)"},
+         {"lowest", "Lowest (640x360)"}},
+        "For laptops and weak GPUs, everything at once: the 1280x720 Resolution drawn at "
+        "960x540 or 640x360 (Lower resolution), NVIDIA DLSS / AMD FSR and the picture filters "
+        "off, the blur EFFECTS off, at most 60 FPS. Changing one of those afterwards shows "
+        "Custom again."));
     // Y: a wider picture raises the X scale with it (burstlimit_widescreen.cpp).
     Item& resolution = display.items.emplace_back(choice(
         "Resolution", "draw_resolution_scale_y",
@@ -423,6 +434,11 @@ class BurstlimitApp : public rex::ReXApp {
         "Which corner the frame rate panel sits in."));
     fps_position.shown_if_cvar = "debug_overlay";
     fps_position.shown_if_values = {"true"};
+    display.items.push_back(choice(
+        "Render path", "render_target_path_d3d12",
+        {{"", "Auto (fast)"}, {"rov", "Compatibility (ROV)"}},
+        "How the GPU draws the game. Use Compatibility only if the picture looks broken (for "
+        "example on old Intel graphics drivers) - it is much slower. Applies after a restart."));
 
     rex::ui::QuickMenuSection& graphics = menu.sections.emplace_back();
     graphics.title = "GRAPHICS";

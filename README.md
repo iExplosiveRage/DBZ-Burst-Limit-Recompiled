@@ -39,6 +39,19 @@ normal Windows program instead of inside an emulator.
 - **Faster rendering**: clears done in place instead of EDRAM transfers, no per-frame re-upload of untouched
   memory, and the unclipped draws' extents worked out on the CPU - about **2x the FPS at native 4K** (100 -> 190+
   on an RTX 4080) and +40 % with DLAA; +32 % on an AMD integrated GPU at 1080p.
+- **Even faster GPU work** (since 0.6.2): resolves go straight into the textures that read them, unchanged
+  pictures aren't copied again, and simple texture fetches skip the level-of-detail math - heavy effects like
+  Goku's special explosion cost far less (at 5K on an RTX 4080: 50 -> 81 FPS in the explosion, 97 -> 246 FPS in
+  a quiet fight; 40 -> 48 FPS on an AMD integrated GPU at 960x540).
+- **Picks the strongest GPU by itself** (since 0.6.2, #17): on PCs and laptops with integrated and dedicated
+  graphics the game runs on the dedicated one (`d3d12_adapter` -1); the log lists every GPU (`DXGI adapter N:`)
+  and which one was used (`DXGI adapter:`). Windows Settings > System > Display > Graphics still overrides it.
+- **Fast render path on Intel GPUs** (since 0.6.2): Intel used a much slower path (about 2.4x slower on an
+  integrated GPU); now every GPU uses the fast one. If the picture looks broken (old Intel drivers), DISPLAY >
+  **Render path** > Compatibility (after a restart).
+- **Graphics preset** (since 0.6.2, #15): DISPLAY > Graphics preset **Low-end PC** (960x540) or **Lowest**
+  (640x360) sets everything for a weak laptop at once: lower resolution, no upscalers or picture filters, blur
+  effects off, at most 60 FPS.
 - **In-game settings menu**: **F1**, or **Back + Start** on the controller, in the game's menu style (its font,
   menu box, button icons and sounds): DISPLAY, GRAPHICS, EFFECTS, GAME, ONLINE and SAVE. Resolution, window size,
   upscalers, frame rate, field of view, post effects, free camera and more; changes apply right away and are
@@ -386,6 +399,9 @@ settings menu (F1). Any setting can also be passed on the command line, e.g. `--
 | `present_vsync` | `true` | VSync: each frame is shown whole from the monitor's next refresh, one per refresh, and a frame rate the refresh rate is a multiple of (60 on 60/120/240 Hz, 144 on 144 Hz, `display`) is locked to the monitor - even motion. G-Sync / FreeSync still work. `false` = present at once, tearing allowed. |
 | `draw_resolution_scale_x/y` | `1` | Internal resolution scale: `1` = 720p, `2` = 1440p, `3` = 4K (sharper, heavier). With a wider `aspect_ratio`, X is raised to match (set Y; the settings menu's **Resolution** does). |
 | `draw_resolution_percent` | `100` | Below 720p for slow GPUs (**Lower resolution** in DISPLAY): with the scale at `1`, the game renders at this percent of 1280x720 (`75` = 960x540, `50` = 640x360, 25-100) and the picture is stretched to the window. Off while DLSS / AMD FSR scene modes are on. |
+| `graphics_preset` | `custom` | **Graphics preset** in DISPLAY: `low_end` = 1280x720 drawn at 960x540, `lowest` = at 640x360, both with DLSS / AMD FSR, picture filters and the blur effects off and at most 60 FPS. Changing one of those settings afterwards shows `custom` again. |
+| `render_target_path_d3d12` | *(empty)* | **Render path** in DISPLAY (after a restart): empty = the fast path on every GPU, `rov` = Compatibility (much slower; only if the picture looks broken, e.g. on old Intel drivers). |
+| `d3d12_adapter` | `-1` | Which GPU: `-1` = the most powerful one, `0`, `1`, ... = the `DXGI adapter N` lines at the top of `burstlimit.log`. |
 | `present_effect` | `bilinear` | `bilinear` (off), `cas` (sharpening), `fsr`, `fsr2`, `fsr3` (AMD FSR upscaling). |
 | `present_fsr_quality_mode` | `auto` | How far below the resolution FSR renders: `auto` (native), `nativeaa`, `quality`, `balanced`, `performance`, `ultra_performance`. |
 | `field_of_view` | `100` | Field of view in percent of the original (50-200). |

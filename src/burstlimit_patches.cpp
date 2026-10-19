@@ -71,6 +71,13 @@ REXCVAR_DEFINE_BOOL(post_effects_hq, true, "Patches",
                     "at 720p (no thin ghost copies above draw_resolution_scale 1).")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
+REXCVAR_DEFINE_STRING(graphics_preset, "custom", "Patches",
+                      "One setting for slow PCs: low_end = 1280x720 drawn at 960x540 (75%), "
+                      "lowest = at 640x360 (50%), both without upscalers, picture filters and "
+                      "blur effects. custom = the separate settings as they are.")
+    .allowed({"custom", "low_end", "lowest"})
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 REXCVAR_DEFINE_STRING(window_size, "", "Patches",
                       "Window size in windowed mode in pixels, for example \"640x480\" (empty = "
                       "the default)");
@@ -216,6 +223,110 @@ struct WindowSizeCvarCallback {
 
 WindowSizeCvarCallback g_window_size_cvar_callback;
 
+// graphics_preset: one setting for slow PCs (issue #15). Picking a preset sets
+// the settings below at once; changing one of them afterwards shows "custom"
+// again. "custom" itself changes nothing.
+struct GraphicsPreset {
+  const char* name;
+  const char* draw_resolution_percent;
+};
+constexpr GraphicsPreset kGraphicsPresets[] = {
+    {"low_end", "75"},  // 960x540, stretched to the window
+    {"lowest", "50"},   // 640x360
+};
+// The settings a preset sets and checks: the 1280x720 resolution, no NVIDIA
+// DLSS / AMD FSR scene upscaler, no picture filters, the game's blur effects
+// off.
+constexpr std::pair<const char*, const char*> kGraphicsPresetValues[] = {
+    {"dlss_mode", "off"},         {"fsr_mode", "off"},          {"present_effect", "bilinear"},
+    {"swap_post_effect", "none"}, {"depth_of_field", "false"},  {"glow_blur", "false"},
+    {"motion_blur", "false"},     {"soft_filter", "false"},
+};
+
+std::atomic<int> g_graphics_preset_applying{0};
+// Set once the GPU's settings exist (BurstLimitGraphicsPresetReady): before
+// that, loading the config changes them one by one.
+std::atomic<bool> g_graphics_preset_ready{false};
+
+const GraphicsPreset* FindGraphicsPreset(std::string_view name) {
+  for (const GraphicsPreset& preset : kGraphicsPresets) {
+    if (name == preset.name) {
+      return &preset;
+    }
+  }
+  return nullptr;
+}
+
+bool GraphicsPresetMatches(const GraphicsPreset& preset) {
+  if ((rex::cvar::GetFlagInfo("draw_resolution_scale_y") &&
+       rex::cvar::GetFlagByName("draw_resolution_scale_y") != "1") ||
+      (rex::cvar::GetFlagInfo("draw_resolution_percent") &&
+       rex::cvar::GetFlagByName("draw_resolution_percent") != preset.draw_resolution_percent)) {
+    return false;
+  }
+  for (const auto& [name, value] : kGraphicsPresetValues) {
+    if (rex::cvar::GetFlagInfo(name) && rex::cvar::GetFlagByName(name) != value) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void ApplyGraphicsPreset(const GraphicsPreset& preset) {
+  ++g_graphics_preset_applying;
+  REXLOG_INFO("Graphics preset {}: 1280x720 at {}%, no upscaler, no picture filters, effects off",
+              preset.name, preset.draw_resolution_percent);
+  for (const auto& [name, value] : kGraphicsPresetValues) {
+    if (rex::cvar::GetFlagInfo(name) && rex::cvar::GetFlagByName(name) != value) {
+      rex::cvar::SetFlagByName(name, value);
+    }
+  }
+  // Like the Resolution setting (a wider aspect ratio raises the X scale again).
+  for (const char* name : {"draw_resolution_scale_y", "draw_resolution_scale_x",
+                           "resolution_scale"}) {
+    if (rex::cvar::GetFlagByName(name) != "1") {
+      rex::cvar::SetFlagByName(name, "1");
+    }
+  }
+  if (rex::cvar::GetFlagByName("draw_resolution_percent") != preset.draw_resolution_percent) {
+    rex::cvar::SetFlagByName("draw_resolution_percent", preset.draw_resolution_percent);
+  }
+  // Above 60 FPS needs a faster PC (monitor refresh rate stays as it is).
+  const std::string rate = rex::cvar::GetFlagByName("frame_rate");
+  if (rate == "120" || rate == "144" || rate == "unlocked") {
+    rex::cvar::SetFlagByName("frame_rate", "60");
+  }
+  --g_graphics_preset_applying;
+}
+
+struct GraphicsPresetCvarCallbacks {
+  GraphicsPresetCvarCallbacks() {
+    rex::cvar::RegisterChangeCallback("graphics_preset",
+                                      [](std::string_view, std::string_view value) {
+                                        const GraphicsPreset* preset = FindGraphicsPreset(value);
+                                        if (preset && g_graphics_preset_ready.load()) {
+                                          ApplyGraphicsPreset(*preset);
+                                        }
+                                      });
+    auto changed = [](std::string_view, std::string_view) {
+      if (g_graphics_preset_applying.load() || !g_graphics_preset_ready.load()) {
+        return;
+      }
+      const GraphicsPreset* preset = FindGraphicsPreset(REXCVAR_GET(graphics_preset));
+      if (preset && !GraphicsPresetMatches(*preset)) {
+        rex::cvar::SetFlagByName("graphics_preset", "custom");
+      }
+    };
+    rex::cvar::RegisterChangeCallback("draw_resolution_scale_y", changed);
+    rex::cvar::RegisterChangeCallback("draw_resolution_percent", changed);
+    for (const auto& [name, value] : kGraphicsPresetValues) {
+      rex::cvar::RegisterChangeCallback(name, changed);
+    }
+  }
+};
+
+GraphicsPresetCvarCallbacks g_graphics_preset_cvar_callbacks;
+
 // Guest frame interval (vblanks per game tick). The game writes 2 (30 FPS)
 // through sub_82218940; the 60 FPS patch forces 1. The pause/match-quit code
 // only runs when the tick counter at [0x825205E8]+3228 is non-zero, which
@@ -351,6 +462,16 @@ bool Is60FpsEnabled() {
 }
 
 }  // namespace
+
+// Called once the GPU is set up (its settings exist): a preset from the config
+// file or the command line that the settings don't match yet is applied now.
+void BurstLimitGraphicsPresetReady() {
+  g_graphics_preset_ready.store(true);
+  const GraphicsPreset* preset = FindGraphicsPreset(REXCVAR_GET(graphics_preset));
+  if (preset && !GraphicsPresetMatches(*preset)) {
+    ApplyGraphicsPreset(*preset);
+  }
+}
 
 // Called once the config and the command line are applied (values set there
 // don't always go through the change callbacks).
