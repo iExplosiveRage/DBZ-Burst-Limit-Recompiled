@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 
 #include <imgui.h>
@@ -94,6 +95,29 @@ void FlushStalls(const char* why) {
   BurstLimitNetInputMatchEnd(why);
 }
 
+// A notice from the game's own code (BurstLimitOnlineGameNotice), shown like
+// the online layer's when that has none.
+std::mutex g_game_notice_mutex;
+std::string g_game_notice;
+std::chrono::steady_clock::time_point g_game_notice_at;
+double g_game_notice_seconds = 0.0;
+
+bool GetGameNotice(rex::net::online::Notice* out) {
+  std::lock_guard<std::mutex> lock(g_game_notice_mutex);
+  if (g_game_notice.empty()) {
+    return false;
+  }
+  const double age =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - g_game_notice_at).count();
+  if (age >= g_game_notice_seconds) {
+    return false;
+  }
+  out->text = g_game_notice;
+  out->age_seconds = age;
+  out->duration_seconds = g_game_notice_seconds;
+  return true;
+}
+
 class OnlineNotice final : public rex::ui::ImGuiDialog {
  public:
   explicit OnlineNotice(rex::ui::ImGuiDrawer* drawer) : ImGuiDialog(drawer) {}
@@ -101,7 +125,8 @@ class OnlineNotice final : public rex::ui::ImGuiDialog {
  protected:
   void OnDraw(ImGuiIO& io) override {
     rex::net::online::Notice notice;
-    if (!rex::net::online::GetNotice(&notice) || notice.text.empty()) {
+    if ((!rex::net::online::GetNotice(&notice) || notice.text.empty()) &&
+        (!GetGameNotice(&notice) || notice.text.empty())) {
       return;
     }
     // ImGui is linked into both the runtime and this exe; draw in the
@@ -164,6 +189,13 @@ void BurstLimitOnlineSetup() {
                                     "online_input_channel", "ki_charge", "ki_charge_rate",
                                     "start_forms"});
   BurstLimitNetInputSetup();
+}
+
+void BurstLimitOnlineGameNotice(const std::string& text, double seconds) {
+  std::lock_guard<std::mutex> lock(g_game_notice_mutex);
+  g_game_notice = text;
+  g_game_notice_at = std::chrono::steady_clock::now();
+  g_game_notice_seconds = seconds;
 }
 
 std::unique_ptr<rex::ui::ImGuiDialog> BurstLimitCreateOnlineNotice(rex::ui::ImGuiDrawer* drawer) {

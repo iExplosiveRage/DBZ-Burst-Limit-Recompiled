@@ -519,6 +519,14 @@ name = "BurstLimitSlotsColour"
 registers = ["r7", "r30"]
 jump_address_on_true = 0x8224A8AC
 
+# sub_82211D70 (online: this console's player record, 72 bytes, copied into
+# the session and sent), memcpy with r4 = the record (+0 u16 character): an
+# extra characters' page value there becomes its base character.
+[[entrypoint.midasm_hook]]
+address = 0x82211DB8
+name = "BurstLimitSlotsSessionRecord"
+registers = ["r4"]
+
 # sub_82249140, A on a card: mr r3,r28 returns the list value (r30 side).
 [[entrypoint.midasm_hook]]
 address = 0x8224A4E4

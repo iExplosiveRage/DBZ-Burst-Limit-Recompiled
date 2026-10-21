@@ -35,6 +35,8 @@ std::unique_ptr<rex::ui::ImGuiDialog> BurstLimitCreateOnlineRules(
 void BurstLimitSavesSetup(const std::filesystem::path& exe_directory,
                           const std::filesystem::path& user_data_root);
 void BurstLimitSavesMenu(rex::ui::QuickMenuConfig& menu);
+// GAME tab "Unlock everything" (the unlocks of a 100% save, records kept).
+void BurstLimitUnlockMenu(rex::ui::QuickMenuSection& section);
 std::unique_ptr<rex::ui::ImGuiDialog> BurstLimitCreateOnlineNotice(rex::ui::ImGuiDrawer* drawer);
 // burstlimit_ranked.cpp: Ranked Match / leaderboard overlay, menu, identity folder.
 std::unique_ptr<rex::ui::ImGuiDialog> BurstLimitCreateRankedOverlay(rex::ui::ImGuiDrawer* drawer);
@@ -650,6 +652,8 @@ class BurstlimitApp : public rex::ReXApp {
     game.items.push_back(key("Freeze key", "bind_freeze_game",
                              "Keyboard key that freezes and unfreezes the game. Press A or "
                              "Enter, then the key to use."));
+    // Unlock everything (burstlimit_saves.cpp), with a confirm step.
+    BurstLimitUnlockMenu(game);
     menu.quick_toggle_label = "Free camera";
     menu.quick_toggle_cvar = "free_camera";
 

@@ -179,6 +179,11 @@ normal Windows program instead of inside an emulator.
 - **Extra characters from mods** (`extra_characters`, since 0.5.0): a mod with a `slot.toml` adds a character on
   a second page of the character select (**R2** / **L2**), with its own name, pictures, moves, voice and
   ultimate names. Tools for making them: [DBZ Burst Limit ModKit](https://github.com/iExplosiveRage/DBZ-Burst-Limit-ModKit).
+  Since 0.7.1 they work **online** too (lobby matches): both players need the same mods.
+- **Unlock everything** (since 0.7.1, F1 > GAME > Unlock everything, press A twice): a full 100% - all
+  characters, forms, costumes, stages, modes, Z Chronicles episodes, Drama Pieces and trial records - while your
+  own records, options and play time are kept. The save is backed up first (`.bak_unlock` next to it). Offline
+  only (not during an online session).
 - **Older online method over LAN / Radmin VPN**: Xbox LIVE sign-in, session create/search/join and player
   matches, emulated on top of plain UDP, with a configurable match driver step (`online_fast_tick`,
   `online_tick_sleep`): the game normally sends input in 12-frame batches (~1 second of input delay even on LAN).
@@ -443,7 +448,7 @@ settings menu (F1). Any setting can also be passed on the command line, e.g. `--
 | `start_forms` | `true` | RB / LB on the character select pick the start form. Online: the host's value is used by both. |
 | `story_costumes` | `true` | The four Z Chronicles costumes on the character select. |
 | `extra_stages` | `true` | The three Z Chronicles stages on the Versus / Training stage select (offline). |
-| `extra_characters` | `true` | Extra characters from mods (`slot.toml`): R2 on the Versus / Training character select shows them (offline). |
+| `extra_characters` | `true` | Extra characters from mods (`slot.toml`): R2 on the Versus / Training character select shows them (online too, since 0.7.1, when both players have the same mods). |
 | `input_delay` | `reduced` | Offline fights: `reduced` = no extra delay, `original` = the game's own 3 frames. From the next fight; online uses `online_input_delay`. |
 | `ki_charge` | `false` | Hold L3 to charge Ki (Shin Budokai style). Online: the host's value is used by both. |
 | `ki_charge_rate` | `16` | Ki added per frame while charging (the gauge holds 3000). |
@@ -602,7 +607,8 @@ mods/
 - A mod can also add an **extra character** with a `slot.toml` (the format is at the top of
   `src/burstlimit_slots.cpp`): it plays as one of the game's characters with its own files (under new names, which
   only the paths `slot.toml` names may add to the archive), and R2 on the Versus / Training character select shows
-  it. New names and extra characters change after a restart.
+  it. New names and extra characters change after a restart. Online (lobby matches, since 0.7.1) extra
+  characters work when both players use the same mods.
 
 ---
 
@@ -627,7 +633,7 @@ mods/
   the Linux zip or Proton.
 - The start screen's Update button and the Discord status haven't been tested through Wine / Proton yet.
 - The Xbox LIVE friends list is not implemented (Friend Rankings stay empty). The game's "Battle Records" ratios
-  are still the local ones. Extra characters (R2 page) are offline only for now.
+  are still the local ones.
 - Running two copies on one PC (local online test) can drop frames on slower machines.
 
 ---

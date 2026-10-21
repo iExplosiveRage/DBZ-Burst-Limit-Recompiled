@@ -44,7 +44,8 @@
 //   model    = ["PAC/CMN/CH/BCGHL/BCGHL0{c}{m}.NUX"]  # {c} colour, {m} model index;
 //   skeleton = ["PAC/CMN/CH/BCGHL/BCGHL0{c}{m}.AMB"]  # one entry per colour, or one for all
 //
-// Character select (Versus and Training, offline): R2 switches a side's list
+// Character select (Versus and Training; online through the lobby too, for
+// this console's side - see "Online" below): R2 switches a side's list
 // to a page with the extra characters - each with its card, big picture and
 // name like the others, Y for its colours - and R2 again (or L2) goes back to
 // the roster. The page is the side's list in the screen's object, swapped:
@@ -77,8 +78,10 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cctype>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
@@ -89,6 +92,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <toml++/toml.hpp>
@@ -97,6 +101,7 @@
 #include <rex/logging.h>
 #include <rex/memory.h>
 #include <rex/memory/utils.h>
+#include <rex/net/online.h>
 #include <rex/net/session.h>
 #include <rex/ppc/context.h>
 #include <rex/runtime.h>
@@ -122,7 +127,8 @@
 REXCVAR_DEFINE_BOOL(extra_characters, true, "Patches",
                     "Extra characters defined by the mods in use (slot.toml): R2 on the character "
                     "select shows them - a fighter that plays as one of the game's characters with "
-                    "its own moves, model, voice and effects. Versus / Training, offline");
+                    "its own moves, model, voice and effects. Versus / Training, and online (Player "
+                    "Match through the lobby: both PCs need the same mods)");
 
 REXCVAR_DEFINE_INT32(extra_character_test_player, -1, "Patches",
                      "Debug: 0 or 1 makes that player (1P / 2P), when it is the slot's base "
@@ -130,6 +136,11 @@ REXCVAR_DEFINE_INT32(extra_character_test_player, -1, "Patches",
                      "first extra character's files (read when the next match is set up); 2 both "
                      "players; -1 off. Versus / Training, offline")
     .range(-1, 2);
+
+// burstlimit_mods.cpp: "" without mods, else "mods.<hash of the files in use>".
+std::string BurstLimitModsOnlineTag();
+// burstlimit_online.cpp: a short message on the screen.
+void BurstLimitOnlineGameNotice(const std::string& text, double seconds);
 
 namespace {
 
@@ -393,6 +404,8 @@ struct Select {
   std::array<bool, 2> ultimates_told{};
   // The slot whose own list the side's Ultimate window shows (-1 none).
   std::array<int, 2> ultimate_window{-1, -1};
+  // Online: this console's side, the only one with the page (-1 offline).
+  int online_side = -1;
 };
 
 // The extra characters of the fight being set up, taken from the match
@@ -403,10 +416,22 @@ struct Fight {
   std::array<int, 2> slot{-1, -1};
 };
 
+// Online (lobby mode), the outcome of the pick exchange for the match request
+// being built (OnlineAgree): each side's extra character as both PCs agreed
+// on it. Without an agreement (no answer, other extra characters on the other
+// PC) both sides play their base character, on both PCs.
+struct OnlineFight {
+  bool valid = false;  // an exchange ran for the request being built
+  bool agreed = false;
+  std::array<int, 2> slot{-1, -1};
+  std::string why;  // no agreement: why
+};
+
 std::mutex g_mutex;
 std::vector<Slot> g_slots;
 Select g_select;
 Fight g_fight;
+OnlineFight g_online_fight;
 // Kept between visits of the character select: each side's last extra
 // character (its page opens on it again) and each one's colour.
 std::array<int, 2> g_last_pick{-1, -1};
@@ -658,6 +683,226 @@ void MakeSelectData(rex::memory::Memory* memory, Slot& slot) {
   }
 }
 
+// --- Online ---
+//
+// The game sends only each side's character and colour over the session: an
+// extra character is its base character there. So, online through the lobby
+// (where both PCs have the same mods - rooms only match between identical mod
+// sets), each PC tells the other which extra character its own side picked,
+// on a side-channel frame of its own (kind 19), when the match request is
+// built - and waits for the other's before the match loads: both PCs load the
+// same characters or, without an answer, both the base characters.
+//
+// The exchange is a handshake per request: each PC sends {its side, a nonce
+// new for this request, the last nonce it got from the other (echo), its
+// pick, a hash of its extra characters}; a PC goes on once a frame from the
+// other echoes its nonce (that frame was sent from the other's own request,
+// so its pick is this match's). Frames go out every 40 ms while waiting, then
+// every 150 ms for kPickPhaseMs so the other side gets its echo too.
+
+constexpr uint8_t kSidePick = rex::net::online::kGameSideKindFirst + 3;  // 19
+constexpr uint8_t kPickVersion = 1;
+constexpr size_t kPickFrame = 24;
+constexpr uint8_t kPickHas = 1;      // flags: a pick (else its own base character)
+constexpr uint8_t kPickWaiting = 2;  // flags: still waiting for an echo
+constexpr uint8_t kPickOff = 4;      // flags: extra characters off on that PC
+constexpr int64_t kPickPhaseMs = 15000;
+constexpr int64_t kPickWaitMs = 12000;
+// The game's online session block: +28 this console's player + 1 (1 host, 2
+// guest).
+constexpr uint32_t kNetSession = 0x84245E50;
+constexpr uint32_t kNetSessionLocalPlayer = 28;
+
+struct PickNet {
+  std::mutex mutex;
+  std::condition_variable cv;
+  bool sender = false;  // the sender thread runs
+  // This PC's frame.
+  int64_t phase_end_ms = 0;
+  bool waiting = false;
+  uint8_t side = 0;
+  uint8_t flags = 0;
+  uint32_t nonce = 0;
+  uint32_t hash = 0;
+  uint16_t base = 0;
+  char code[4] = {};
+  // The other PC's last frame.
+  bool have_remote = false;
+  uint8_t remote_side = 0;
+  uint8_t remote_flags = 0;
+  uint32_t remote_nonce = 0, remote_echo = 0, remote_hash = 0;
+  uint16_t remote_base = 0;
+  char remote_code[4] = {};
+};
+PickNet g_pick_net;
+
+bool OnlineLobby() {
+  return rex::net::IsGameSessionOpen() && rex::net::online::IsLobbyMode();
+}
+
+// Online: this console's side (0 host, 1 guest); -1 offline or unknown.
+int LocalSide(rex::memory::Memory* memory) {
+  if (!memory || !OnlineLobby()) {
+    return -1;
+  }
+  const uint32_t player = R32(memory, kNetSession + kNetSessionLocalPlayer);
+  return (player == 1 || player == 2) ? int(player) - 1 : -1;
+}
+
+void PutU32(uint8_t* at, uint32_t value) {
+  for (int i = 0; i < 4; ++i) {
+    at[i] = uint8_t(value >> (8 * i));
+  }
+}
+uint32_t GetU32(const uint8_t* at) {
+  return uint32_t(at[0]) | uint32_t(at[1]) << 8 | uint32_t(at[2]) << 16 | uint32_t(at[3]) << 24;
+}
+
+// The extra characters this PC has (mods tag, then each one's code, base and
+// colours), so two PCs with different ones never use them (`mods_tag`:
+// BurstLimitModsOnlineTag, read before g_mutex is taken). Called with g_mutex
+// held.
+uint32_t SlotsHash(const std::string& mods_tag) {
+  std::string text = mods_tag;
+  for (const Slot& slot : g_slots) {
+    text += "|" + slot.code + ":" + std::to_string(slot.base) + ":" +
+            std::to_string(slot.colours) + ":" + std::to_string(slot.max_form);
+  }
+  uint32_t hash = 2166136261u;
+  for (const char c : text) {
+    hash = (hash ^ uint8_t(c)) * 16777619u;
+  }
+  return hash ? hash : 1;
+}
+
+void PickSenderLoop() {
+  for (;;) {
+    uint8_t frame[kPickFrame] = {};
+    int64_t pause_ms = 150;
+    {
+      std::unique_lock<std::mutex> lock(g_pick_net.mutex);
+      if (NowMs() >= g_pick_net.phase_end_ms) {
+        g_pick_net.cv.wait_for(lock, std::chrono::milliseconds(500));
+        continue;
+      }
+      frame[0] = kPickVersion;
+      frame[1] = g_pick_net.side;
+      frame[2] = uint8_t(g_pick_net.flags | (g_pick_net.waiting ? kPickWaiting : 0));
+      PutU32(frame + 4, g_pick_net.nonce);
+      PutU32(frame + 8, g_pick_net.have_remote ? g_pick_net.remote_nonce : 0);
+      PutU32(frame + 12, g_pick_net.hash);
+      frame[16] = uint8_t(g_pick_net.base);
+      frame[17] = uint8_t(g_pick_net.base >> 8);
+      std::memcpy(frame + 18, g_pick_net.code, 4);
+      pause_ms = g_pick_net.waiting ? 40 : 150;
+    }
+    rex::net::online::SendGameSide(kSidePick, frame, sizeof(frame));
+    std::this_thread::sleep_for(std::chrono::milliseconds(pause_ms));
+  }
+}
+
+// Online, from the match request's hook (game thread, g_mutex NOT held): the
+// exchange for this request. `local_pick` is this side's extra character (-1
+// none). Fills g_online_fight (under g_mutex).
+void OnlineAgree(rex::memory::Memory* memory, int local_side, int local_pick, bool off,
+                 uint32_t hash, const std::string& code, uint32_t base) {
+  static std::atomic<uint32_t> counter{0};
+  const uint32_t nonce =
+      uint32_t(NowMs() * 2654435761u) ^ (++counter * 40503u) ^ uint32_t(local_side + 1) << 30;
+  {
+    std::lock_guard<std::mutex> lock(g_pick_net.mutex);
+    g_pick_net.side = uint8_t(local_side);
+    g_pick_net.nonce = nonce ? nonce : 1;
+    g_pick_net.hash = hash;
+    g_pick_net.flags = uint8_t((local_pick >= 0 ? kPickHas : 0) | (off ? kPickOff : 0));
+    g_pick_net.base = uint16_t(base);
+    std::memset(g_pick_net.code, 0, sizeof(g_pick_net.code));
+    std::memcpy(g_pick_net.code, code.data(), std::min<size_t>(code.size(), 3));
+    g_pick_net.waiting = true;
+    g_pick_net.phase_end_ms = NowMs() + kPickPhaseMs;
+    if (!g_pick_net.sender) {
+      g_pick_net.sender = true;
+      std::thread(PickSenderLoop).detach();
+    }
+  }
+  g_pick_net.cv.notify_all();
+  REXLOG_INFO("Slots (online): side {} sends its pick ({}) and waits for the other PC's", local_side,
+              local_pick >= 0 ? code : std::string("its own character"));
+  const int64_t start = NowMs();
+  bool agreed = false;
+  uint8_t remote_flags = 0;
+  uint32_t remote_hash = 0;
+  uint16_t remote_base = 0;
+  char remote_code[4] = {};
+  {
+    std::unique_lock<std::mutex> lock(g_pick_net.mutex);
+    const uint32_t mine = g_pick_net.nonce;
+    while (true) {
+      if (g_pick_net.have_remote && g_pick_net.remote_echo == mine &&
+          g_pick_net.remote_side == uint8_t(1 - local_side)) {
+        agreed = true;
+        remote_flags = g_pick_net.remote_flags;
+        remote_hash = g_pick_net.remote_hash;
+        remote_base = g_pick_net.remote_base;
+        std::memcpy(remote_code, g_pick_net.remote_code, 4);
+        break;
+      }
+      if (NowMs() - start >= kPickWaitMs || !rex::net::IsGameSessionOpen()) {
+        break;
+      }
+      g_pick_net.cv.wait_for(lock, std::chrono::milliseconds(20));
+    }
+    g_pick_net.waiting = false;
+  }
+  const int64_t waited = NowMs() - start;
+  std::lock_guard<std::mutex> lock(g_mutex);
+  OnlineFight result;
+  result.valid = true;
+  if (!agreed) {
+    result.why = "no answer from the other PC";
+  } else if ((remote_flags & kPickOff) || off) {
+    result.why = "extra characters are off on " + std::string(off ? "this PC" : "the other PC");
+  } else if (remote_hash != hash) {
+    result.why = "the two PCs have different extra characters";
+  } else {
+    result.agreed = true;
+    result.slot[local_side] = local_pick;
+    if (remote_flags & kPickHas) {
+      const std::string remote(remote_code, strnlen(remote_code, 3));
+      int found = -1;
+      for (int i = 0; i < int(g_slots.size()); ++i) {
+        if (g_slots[i].code == remote && g_slots[i].base == remote_base) {
+          found = i;
+        }
+      }
+      if (found < 0) {
+        // (the same hash: can't happen) Both base characters, as the other PC
+        // can't know: the hashes say they match.
+        result.agreed = false;
+        result.slot = {-1, -1};
+        result.why = "the other PC's extra character " + remote + " isn't here";
+      } else {
+        result.slot[1 - local_side] = found;
+      }
+    }
+  }
+  g_online_fight = result;
+  if (result.agreed) {
+    REXLOG_INFO("Slots (online): agreed in {} ms - side 0: {}, side 1: {}", waited,
+                result.slot[0] >= 0 ? g_slots[result.slot[0]].code : std::string("-"),
+                result.slot[1] >= 0 ? g_slots[result.slot[1]].code : std::string("-"));
+  } else {
+    REXLOG_WARN("Slots (online): no agreement after {} ms ({}): both sides play their base "
+                "characters",
+                waited, result.why);
+    if (local_pick >= 0 || (agreed && (remote_flags & kPickHas)) || !agreed) {
+      BurstLimitOnlineGameNotice("Extra characters: " + result.why +
+                                     " - both players use the base characters",
+                                 7.0);
+    }
+  }
+}
+
 // --- The fight ---
 
 // Takes the extra characters of the fight from the match request the game
@@ -668,12 +913,43 @@ void TakeFight(rex::memory::Memory* memory, uint32_t request) {
   g_fight.slot = {-1, -1};
   // Read once per fight, here.
   const int test = REXCVAR_GET(extra_character_test_player);
+  const bool online = OnlineLobby();
   std::array<int, 2> want = g_select.pick;
   std::array<bool, 2> from_test{};
-  for (int p = 0; p < 2; ++p) {
-    if (want[p] < 0 && (test == p || test == 2)) {
-      want[p] = 0;
-      from_test[p] = true;
+  if (online) {
+    // Online: only what both PCs agreed on (OnlineAgree), never the debug
+    // setting.
+    if (!g_online_fight.valid || !g_online_fight.agreed) {
+      return;
+    }
+    want = g_online_fight.slot;
+    // The session doesn't always carry an extra character's base character
+    // for the side that picked it on its page (the other console's view of
+    // that side's cursor can end up in the session: another character). Both
+    // PCs agreed on the pick, so both write its base character here - the
+    // same request on both.
+    if (REXCVAR_GET(extra_characters)) {
+      for (uint32_t p = 0; p < 2; ++p) {
+        const int index = want[p];
+        if (index < 0 || index >= int(g_slots.size())) {
+          continue;
+        }
+        const uint32_t at = request + p * kRequestStride;
+        const uint16_t character = R16(memory, at);
+        if (character != g_slots[index].base) {
+          W16(memory, at, uint16_t(g_slots[index].base));
+          REXLOG_INFO("Slots (online): player {} ({}P) is {} - the session had character {}, "
+                      "{} written",
+                      p, p + 1, g_slots[index].code, character, g_slots[index].base);
+        }
+      }
+    }
+  } else {
+    for (int p = 0; p < 2; ++p) {
+      if (want[p] < 0 && (test == p || test == 2)) {
+        want[p] = 0;
+        from_test[p] = true;
+      }
     }
   }
   if (want[0] < 0 && want[1] < 0) {
@@ -685,8 +961,8 @@ void TakeFight(rex::memory::Memory* memory, uint32_t request) {
     why = "extra_characters is off";
   } else if (g_slots.empty()) {
     why = "no extra character defined (a mod with a slot.toml, switched on at start)";
-  } else if (rex::net::IsGameSessionOpen()) {
-    why = "online";
+  } else if (rex::net::IsGameSessionOpen() && !online) {
+    why = "online without the lobby";
   } else if (mode != kModeVersus && mode != kModeTraining) {
     why = "battle mode " + std::to_string(mode) + " (only Versus 1 / Training 2)";
   }
@@ -695,7 +971,9 @@ void TakeFight(rex::memory::Memory* memory, uint32_t request) {
     if (index < 0) {
       continue;
     }
-    const char* source = from_test[p] ? "extra_character_test_player" : "the character select";
+    const char* source = from_test[p] ? "extra_character_test_player"
+                         : online     ? "the online pick exchange"
+                                      : "the character select";
     if (!why.empty()) {
       REXLOG_INFO("Slots: player {} ({}P) plays its own character ({}: {})", p, p + 1, source,
                   why);
@@ -744,8 +1022,9 @@ int SlotForPlayer(rex::memory::Memory* memory, uint32_t player, std::string* why
   if (!REXCVAR_GET(extra_characters)) {
     return refuse("extra_characters is off");
   }
-  if (rex::net::IsGameSessionOpen()) {
-    return refuse("online");
+  if (rex::net::IsGameSessionOpen() &&
+      !(OnlineLobby() && g_online_fight.valid && g_online_fight.agreed)) {
+    return refuse("online without an agreement on the extra characters");
   }
   if (!request) {
     return refuse("no match request");
@@ -807,7 +1086,13 @@ uint32_t HudName(rex::memory::Memory* memory, Slot& slot) {
 // after it (Versus / Training, offline), while that side still has its base
 // character; -1 none. Called with g_mutex held.
 int PickedSlot(rex::memory::Memory* memory, uint32_t side) {
-  if (side > 1 || !memory || !REXCVAR_GET(extra_characters) || rex::net::IsGameSessionOpen()) {
+  if (side > 1 || !memory || !REXCVAR_GET(extra_characters)) {
+    return -1;
+  }
+  // Online (lobby): this console's own side only (the other side's pick is
+  // only known once the match request is built).
+  const bool online = rex::net::IsGameSessionOpen();
+  if (online && LocalSide(memory) != int(side)) {
     return -1;
   }
   const int index = g_select.pick[side];
@@ -815,7 +1100,8 @@ int PickedSlot(rex::memory::Memory* memory, uint32_t side) {
     return -1;
   }
   const uint32_t menu = R32(memory, kMenuMode);
-  if (std::find(std::begin(kMenuModes), std::end(kMenuModes), menu) == std::end(kMenuModes)) {
+  if (!online &&
+      std::find(std::begin(kMenuModes), std::end(kMenuModes), menu) == std::end(kMenuModes)) {
     return -1;
   }
   uint32_t character = R32(memory, kSideBlocks + side * kSideBlockStride + kSideCharacter);
@@ -1947,6 +2233,38 @@ bool BurstLimitSlotsRequest(PPCRegister& r31) {
   if (!memory || !request) {
     return false;
   }
+  if (OnlineLobby()) {
+    // Online through the lobby: agree with the other PC on both sides' extra
+    // characters first (this waits for its answer).
+    const std::string mods_tag = BurstLimitModsOnlineTag();
+    int local_side = -1, local_pick = -1;
+    bool off = false, any = false;
+    uint32_t hash = 0, base = 0;
+    std::string code;
+    {
+      std::lock_guard<std::mutex> lock(g_mutex);
+      any = !g_slots.empty();
+      local_side = LocalSide(memory);
+      off = !REXCVAR_GET(extra_characters);
+      hash = SlotsHash(mods_tag);
+      const int pick = local_side >= 0 ? g_select.pick[local_side] : -1;
+      if (!off && pick >= 0 && pick < int(g_slots.size())) {
+        local_pick = pick;
+        code = g_slots[pick].code;
+        base = g_slots[pick].base;
+      }
+      g_online_fight = OnlineFight{};
+      if (any && local_side < 0) {
+        g_online_fight.valid = true;
+        g_online_fight.why = "this console's side is unknown";
+      }
+    }
+    // (No extra characters here: none on the other PC either - the rooms
+    // match by mods.)
+    if (any && local_side >= 0) {
+      OnlineAgree(memory, local_side, local_pick, off, hash, code, base);
+    }
+  }
   std::lock_guard<std::mutex> lock(g_mutex);
   TakeFight(memory, request);
   const std::array<int, 2> slot = g_fight.slot;
@@ -2013,12 +2331,76 @@ bool BurstLimitSlotsRequest(PPCRegister& r31) {
 // different ones, picked an extra character.
 bool BurstLimitSlotsSessionColour() {
   std::lock_guard<std::mutex> lock(g_mutex);
-  if (g_select.pick[0] == g_select.pick[1]) {
+  // Online each PC knows only its own side's pick here: the game's rule, the
+  // same on both PCs (BurstLimitSlotsRequest settles the colours once both
+  // picks are agreed).
+  if (rex::net::IsGameSessionOpen() || g_select.pick[0] == g_select.pick[1]) {
     return false;
   }
   REXLOG_INFO("Slots: the same character and colour on both sides, but {} - the colours stay",
               g_select.pick[0] >= 0 && g_select.pick[1] >= 0 ? "two extra characters"
                                                              : "one is an extra character");
+  return true;
+}
+
+// Mid-asm hook at 0x82211DB8 in sub_82211D70 (online: this console's player
+// record, 72 bytes - +0 u16 the character - is copied into the session and
+// sent to the other PC; the character select writes the list value under the
+// cursor there as it moves and on A): on the extra characters' page that is a
+// page value (22-31), which no other code knows - its base character instead
+// (the pick itself travels on the side channel, OnlineAgree).
+void BurstLimitSlotsSessionRecord(PPCRegister& r4) {
+  auto* memory = GuestMemory();
+  if (!memory || !r4.u32) {
+    return;
+  }
+  const uint16_t value = R16(memory, r4.u32);
+  if (value < kValuePad || value >= kListSize) {
+    return;
+  }
+  std::lock_guard<std::mutex> lock(g_mutex);
+  const int index = SlotOfValue(value);
+  const uint16_t base = index >= 0 ? uint16_t(g_slots[index].base) : 0;
+  W16(memory, r4.u32, base);
+  static uint16_t told = 0xFFFF;
+  if (told != value) {
+    told = value;
+    REXLOG_INFO("Slots (online): the session record's character {} (extra characters' page) "
+                "sent as {}",
+                value, base);
+  }
+}
+
+// burstlimit_netinput.cpp's side-channel handler, for kind 19: the other PC's
+// pick frame (network thread; see OnlineAgree).
+bool BurstLimitSlotsOnSide(uint8_t kind, const uint8_t* body, size_t size) {
+  if (kind != kSidePick) {
+    return false;
+  }
+  if (size < kPickFrame || body[0] != kPickVersion || body[1] > 1) {
+    return true;
+  }
+  {
+    std::lock_guard<std::mutex> lock(g_pick_net.mutex);
+    const uint32_t nonce = GetU32(body + 4);
+    const bool fresh = !g_pick_net.have_remote || g_pick_net.remote_nonce != nonce;
+    g_pick_net.have_remote = true;
+    g_pick_net.remote_side = body[1];
+    g_pick_net.remote_flags = body[2];
+    g_pick_net.remote_nonce = nonce;
+    g_pick_net.remote_echo = GetU32(body + 8);
+    g_pick_net.remote_hash = GetU32(body + 12);
+    g_pick_net.remote_base = uint16_t(body[16] | body[17] << 8);
+    std::memcpy(g_pick_net.remote_code, body + 18, 4);
+    g_pick_net.remote_code[3] = 0;
+    if (fresh) {
+      REXLOG_INFO("Slots (online): the other PC (side {}) picked {} (hash {:08X}{})", body[1],
+                  (body[2] & kPickHas) ? std::string(g_pick_net.remote_code)
+                                       : std::string("its own character"),
+                  g_pick_net.remote_hash, (body[2] & kPickOff) ? ", extra characters off" : "");
+    }
+  }
+  g_pick_net.cv.notify_all();
   return true;
 }
 
@@ -2064,6 +2446,8 @@ void BurstLimitSlotsSelectSetup(PPCRegister& r30) {
   if (!memory || !object) {
     return;
   }
+  // (Read before g_mutex: the mods code calls in here with its own lock held.)
+  const bool mods_tag = !BurstLimitModsOnlineTag().empty();
   std::lock_guard<std::mutex> lock(g_mutex);
   const bool keep = R8(memory, object + kObjectKeep) != 0;
   const std::array<int, 2> kept = g_select.pick;
@@ -2076,11 +2460,16 @@ void BurstLimitSlotsSelectSetup(PPCRegister& r30) {
   const uint32_t menu = R32(memory, kMenuMode);
   if (!REXCVAR_GET(extra_characters)) {
     g_select.why = "extra_characters is off";
-  } else if (rex::net::IsGameSessionOpen()) {
-    g_select.why = "online (both PCs would need the same extra characters)";
+  } else if (rex::net::IsGameSessionOpen() && !rex::net::online::IsLobbyMode()) {
+    g_select.why = "online without the lobby (both PCs would need the same extra characters)";
+  } else if (rex::net::IsGameSessionOpen() && !mods_tag) {
+    g_select.why = "online without a mods tag";
+  } else if (rex::net::IsGameSessionOpen() && LocalSide(memory) < 0) {
+    g_select.why = "online, this console's side unknown";
   } else if (R8(memory, object + kObjectTrial) ||
-             std::find(std::begin(kMenuModes), std::end(kMenuModes), menu) ==
-                 std::end(kMenuModes)) {
+             (!rex::net::IsGameSessionOpen() &&
+              std::find(std::begin(kMenuModes), std::end(kMenuModes), menu) ==
+                  std::end(kMenuModes))) {
     g_select.why = "only in Versus and Training (this is menu " + std::to_string(menu) + ")";
   }
   if (!g_select.why.empty()) {
@@ -2099,9 +2488,17 @@ void BurstLimitSlotsSelectSetup(PPCRegister& r30) {
         uint32_t(slot.colours));
     names += (names.empty() ? "" : ", ") + slot.name;
   }
-  REXLOG_INFO("Slots: character select (menu {}): R2 shows the extra characters ({})", menu,
+  g_select.online_side = LocalSide(memory);
+  REXLOG_INFO("Slots: character select (menu {}{}): R2 shows the extra characters ({})", menu,
+              g_select.online_side >= 0
+                  ? ", online: side " + std::to_string(g_select.online_side) + " only"
+                  : std::string(),
               names);
   for (uint32_t side = 0; side < 2; ++side) {
+    if (g_select.online_side >= 0 && int(side) != g_select.online_side) {
+      g_select.pick[side] = -1;  // (the other PC's side: its pick comes over the network)
+      continue;
+    }
     const int last = g_last_pick[side];
     const uint32_t cursor = R32(memory, object + kObjectCursor + side * 4);
     if (last < 0 || last >= PageSlots() || cursor >= kListSize ||
@@ -2150,12 +2547,15 @@ bool BurstLimitSlotsSelectPage(PPCRegister& r17, PPCRegister& r19, PPCRegister& 
   if (!memory || object != g_select.object) {
     return false;
   }
-  if (!g_select.available || rex::net::IsGameSessionOpen()) {
+  if (!g_select.available) {
     if (!g_select.told) {
       g_select.told = true;
-      REXLOG_INFO("Slots: R2 on the character select does nothing here: {}",
-                  g_select.available ? "online" : g_select.why);
+      REXLOG_INFO("Slots: R2 on the character select does nothing here: {}", g_select.why);
     }
+    return false;
+  }
+  // Online: this console's side only.
+  if (rex::net::IsGameSessionOpen() && int(side) != g_select.online_side) {
     return false;
   }
   const uint32_t step = R32(memory, kSideBlocks + side * kSideBlockStride + kSideStep);

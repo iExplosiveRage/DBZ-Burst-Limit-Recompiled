@@ -78,6 +78,8 @@ REXCVAR_DEFINE_BOOL(online_hold_freeze, false, "Patches",
 bool BurstLimitFormsOnSide(uint8_t kind, const uint8_t* body, size_t size);
 // burstlimit_online_rules.cpp: the Player Match room rules (side-channel kind 18).
 bool BurstLimitOnlineRulesOnSide(uint8_t kind, const uint8_t* body, size_t size);
+// burstlimit_slots.cpp: the online pick exchange (kind 19).
+bool BurstLimitSlotsOnSide(uint8_t kind, const uint8_t* body, size_t size);
 
 namespace {
 
@@ -223,7 +225,8 @@ struct Inbox {
 } g_inbox;
 
 void OnGameSide(uint8_t kind, const uint8_t* body, size_t size) {
-  if (BurstLimitFormsOnSide(kind, body, size) || BurstLimitOnlineRulesOnSide(kind, body, size)) {
+  if (BurstLimitFormsOnSide(kind, body, size) || BurstLimitOnlineRulesOnSide(kind, body, size) ||
+      BurstLimitSlotsOnSide(kind, body, size)) {
     return;
   }
   if (kind != kSideInput || size < kInputHeader || body[0] != kInputVersion) {

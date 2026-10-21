@@ -43,6 +43,9 @@
 #include <rex/net/session.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/xam/content_manager.h>
+#include <rex/memory.h>
+#include <rex/memory/utils.h>
+#include <rex/runtime.h>
 #include <rex/system/xam/user_profile.h>
 #include <rex/ui/overlay/quick_menu.h>
 
@@ -798,6 +801,279 @@ std::vector<std::pair<std::string, std::string>> ListSavesFolder() {
   return list;
 }
 
+// ---------------------------------------------------------------- unlock everything
+//
+// GAME tab "Unlock everything": a true 100% - everything a 100% save has
+// (characters, forms, costumes, stages, modes, Z Chronicles episodes and their
+// clears, Drama Pieces, trial records) - while the player's own options, play
+// time and status counters stay. The game keeps its save image at
+// [0x825205E8] + 16 (0x84140F00) in the same layout as savegame.txt.
+// Compared with a fresh save, a 100% save differs in (how each part is merged):
+//   0x000        checksum                                     (recomputed)
+//   0x004-0x04F  options                                      (player's)
+//   0x050-0x46F  Z Chronicles battle records, one u32 each,
+//                0x80000000 = cleared + grade / score bits     (100% where empty)
+//   0x560-0x86F  Trial record tables (counts, scores, dates),
+//                three tables 0x560 / 0x680 / 0x7B0             (100% where the
+//                                                               player's is empty)
+//   0x870-0x8AF  Trial / completion counters, u32             (the higher one)
+//   0x8B0-0x8CF  Status screen: play time, battles, attacks,
+//                guards, sparks, ultimates, transformations    (player's)
+//   0x8D0-0xA8F  unlock flags (characters, costumes, Drama
+//                Pieces...), 0 locked / 1-2 unlocked; forms at
+//                0x978 + 5 * character + form                  (the higher one)
+//   0xBFC-0xC60  Z Chronicles episode flags                    (the higher one)
+// Records only fill empty entries: a cleared battle / filled table of the
+// player's is kept as it is (the grade bits' order isn't known).
+
+constexpr uint32_t kSavePointer = 0x825205E8;  // -> save block; the image is at +16
+constexpr uint32_t kSaveImageOffset = 16;
+
+// The 100% save's bytes from 0x050 on (records, trial tables, counters and
+// flags; not its status block 0x8B0-0x8CF): 22 runs, 1100 bytes.
+struct TemplateRun {
+  uint16_t offset;
+  uint16_t size;
+};
+constexpr TemplateRun kTemplateRuns[] = {
+    {0x054, 4}, {0x070, 4}, {0x164, 4}, {0x200, 216}, {0x3B0, 180}, {0x560, 1}, {0x572, 2},
+    {0x5E9, 3}, {0x660, 33}, {0x6A1, 3}, {0x6B5, 3}, {0x719, 3}, {0x72D, 3}, {0x7B0, 6},
+    {0x7CE, 6}, {0x7E5, 3}, {0x7F9, 3}, {0x80D, 3}, {0x830, 22}, {0x877, 49}, {0x8D0, 448},
+    {0xBFC, 101},
+};
+constexpr uint8_t kTemplateBytes[1100] = {
+    128, 0, 45, 108, 128, 0, 66, 229, 128, 0, 100, 231, 128, 0, 71, 233, 128, 0, 14, 65, 128, 0, 43, 105,
+    128, 0, 35, 105, 128, 0, 51, 236, 128, 0, 231, 110, 128, 0, 93, 251, 128, 0, 3, 233, 128, 0, 244, 247,
+    128, 0, 62, 229, 128, 0, 15, 232, 128, 0, 66, 236, 128, 0, 66, 225, 128, 0, 212, 231, 128, 0, 38, 231,
+    128, 0, 33, 233, 128, 0, 59, 235, 128, 0, 55, 173, 128, 0, 57, 235, 128, 0, 137, 237, 128, 0, 12, 231,
+    128, 0, 23, 237, 128, 0, 67, 172, 128, 0, 37, 237, 128, 0, 53, 239, 128, 0, 15, 170, 128, 0, 19, 235,
+    128, 0, 17, 235, 128, 0, 19, 235, 128, 0, 3, 234, 128, 0, 3, 236, 128, 0, 27, 235, 128, 0, 9, 233,
+    128, 0, 19, 237, 128, 0, 53, 173, 128, 0, 75, 239, 128, 0, 7, 201, 128, 0, 39, 235, 128, 0, 31, 41,
+    128, 0, 49, 232, 128, 0, 51, 232, 128, 0, 37, 249, 128, 0, 67, 171, 128, 0, 25, 235, 128, 0, 55, 238,
+    128, 0, 59, 235, 128, 0, 11, 203, 128, 0, 17, 235, 128, 0, 43, 235, 128, 0, 17, 235, 128, 0, 19, 235,
+    128, 0, 49, 234, 128, 0, 60, 227, 128, 0, 61, 235, 128, 0, 71, 234, 128, 0, 12, 226, 128, 0, 32, 227,
+    128, 0, 34, 178, 128, 0, 16, 186, 128, 0, 134, 130, 128, 0, 0, 162, 128, 0, 16, 227, 128, 0, 252, 242,
+    128, 0, 41, 202, 0, 0, 0, 0, 128, 0, 2, 66, 128, 0, 96, 66, 128, 0, 86, 225, 128, 0, 116, 226,
+    128, 0, 40, 99, 128, 0, 60, 67, 128, 0, 116, 199, 128, 0, 40, 226, 128, 0, 18, 99, 128, 0, 12, 114,
+    128, 0, 16, 225, 0, 0, 0, 0, 0, 0, 0, 0, 128, 0, 54, 193, 0, 0, 0, 0, 128, 0, 8, 66,
+    0, 0, 0, 0, 0, 0, 0, 0, 128, 0, 22, 99, 0, 0, 0, 0, 128, 0, 24, 194, 128, 0, 10, 66,
+    128, 0, 2, 67, 128, 0, 5, 251, 0, 0, 0, 0, 128, 0, 38, 99, 0, 0, 0, 0, 128, 0, 22, 65,
+    0, 0, 0, 0, 128, 0, 18, 65, 128, 0, 20, 80, 128, 0, 16, 97, 0, 0, 0, 0, 128, 0, 44, 226,
+    3, 217, 3, 8, 6, 16, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 255, 255, 255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0, 3, 9, 236, 160, 7, 216, 52, 8, 6, 18,
+    8, 6, 18, 19, 0, 0, 0, 0, 19, 1, 0, 0, 1, 39, 82, 2, 54, 242, 8, 6, 16, 8, 6, 16,
+    19, 0, 0, 0, 0, 3, 0, 0, 0, 0, 38, 0, 0, 0, 0, 65, 0, 0, 0, 0, 1, 2, 22, 0,
+    0, 0, 0, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 5, 0,
+    0, 0, 0, 0, 0, 0, 31, 0, 0, 19, 136, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 20, 2,
+    2, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 0, 0, 2, 2, 2, 2, 2,
+    2, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 1,
+    1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 2, 2, 1, 2, 2, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 2, 1, 2, 2, 1, 1, 1, 0, 2, 1, 0, 2, 1, 0, 2, 1, 1, 1,
+    2, 2, 2, 1, 0, 1, 1, 0, 1, 1, 0, 2, 1, 0, 1, 1, 0, 1, 1, 0, 1, 1, 0, 1,
+    2, 0, 1, 1, 0, 1, 1, 0, 2, 1, 0, 2, 1, 0, 1, 1, 0, 2, 2, 0, 1, 2, 0, 1,
+    1, 2, 0, 0, 1, 1, 0, 0, 0, 1, 1, 2, 0, 0, 1, 1, 2, 0, 0, 2, 2, 0, 0, 0,
+    1, 1, 2, 0, 0, 1, 1, 2, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 2, 0, 0, 0,
+    0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 1, 1, 1, 2, 1, 0, 0,
+    0, 0, 1, 0, 0, 0, 0, 2, 0, 0, 0, 0, 1, 1, 1, 2, 0, 1, 0, 0, 0, 0, 2, 0,
+    0, 0, 0, 2, 0, 0, 0, 0, 2, 1, 2, 1, 2, 1, 2, 2, 2, 2, 2, 1, 2, 2, 2, 1,
+    2, 1, 2, 1, 2, 1, 2, 2, 2, 1, 0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 1, 1, 0, 2,
+    2, 0, 0, 0, 2, 0, 0, 0, 1, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 1, 0, 1, 0, 0,
+    0, 1, 2, 0, 0, 1, 1, 0, 0, 0, 1, 0, 1, 0, 0, 1, 0, 0, 0, 0, 1, 1, 0, 0,
+    0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0,
+    0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 1,
+    0, 1, 1, 0, 1, 0, 0, 0, 0, 2, 0, 0, 0, 0, 1, 0, 0, 1, 1, 1, 1, 2, 1, 2,
+    2, 2, 2, 0, 0, 2, 1, 2, 2, 2, 2, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+    2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+    2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+    2, 2, 1, 1, 2, 2, 2, 2, 2, 2, 1, 0, 1, 0, 0, 2, 1, 1, 1, 0, 0, 2, 2, 2,
+    2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 0, 2, 1, 1, 1, 1,
+};
+
+std::mutex g_unlock_status_mutex;
+rex::ui::QuickMenuStatus g_unlock_status;
+// The first A arms the item until this time; a second A before it unlocks.
+std::chrono::steady_clock::time_point g_unlock_armed_until;
+
+void SetUnlockStatus(std::string text, bool error) {
+  if (error) {
+    REXLOG_WARN("Unlock everything: {}", text);
+  } else {
+    REXLOG_INFO("Unlock everything: {}", text);
+  }
+  std::lock_guard<std::mutex> lock(g_unlock_status_mutex);
+  g_unlock_status.text = std::move(text);
+  g_unlock_status.error = error;
+}
+
+// The 100% save as a whole image (zeros where the table has nothing).
+const std::array<uint8_t, kSaveSize>& Template() {
+  static const std::array<uint8_t, kSaveSize> image = [] {
+    std::array<uint8_t, kSaveSize> out{};
+    size_t at = 0;
+    for (const TemplateRun& run : kTemplateRuns) {
+      std::memcpy(out.data() + run.offset, kTemplateBytes + at, run.size);
+      at += run.size;
+    }
+    return out;
+  }();
+  return image;
+}
+
+// Merges the 100% save into `save` (see the table above); returns how many
+// bytes changed.
+size_t ApplyUnlocks(uint8_t* save) {
+  const std::array<uint8_t, kSaveSize>& full = Template();
+  size_t changed = 0;
+  auto set = [&](size_t offset, uint8_t value) {
+    if (save[offset] != value) {
+      save[offset] = value;
+      ++changed;
+    }
+  };
+  // Z Chronicles battle records: empty (cleared bit not set) -> the 100% one.
+  for (size_t offset = 0x050; offset < 0x470; offset += 4) {
+    if (!(save[offset] & 0x80) && LoadBE32(full.data() + offset)) {
+      for (size_t i = 0; i < 4; ++i) {
+        set(offset + i, full[offset + i]);
+      }
+    }
+  }
+  // Trial record tables: the 100% one when the player's has nothing of its own.
+  constexpr std::pair<size_t, size_t> kTables[] = {{0x560, 0x680}, {0x680, 0x7B0}, {0x7B0, 0x870}};
+  for (const auto& [begin, end] : kTables) {
+    bool empty = true;
+    for (size_t i = begin; i < end && empty; ++i) {
+      empty = save[i] == 0 || save[i] == full[i];
+    }
+    if (empty) {
+      for (size_t i = begin; i < end; ++i) {
+        set(i, full[i]);
+      }
+    }
+  }
+  // Counters: at least the 100% save's.
+  for (size_t offset = 0x870; offset < 0x8B0; offset += 4) {
+    if (LoadBE32(full.data() + offset) > LoadBE32(save + offset)) {
+      for (size_t i = 0; i < 4; ++i) {
+        set(offset + i, full[offset + i]);
+      }
+    }
+  }
+  // Unlock and episode flags: the higher value (forms 2 like the 100% save).
+  for (size_t offset = 0x8D0; offset < kSaveSize; ++offset) {
+    if (full[offset] > save[offset]) {
+      set(offset, full[offset]);
+    }
+  }
+  return changed;
+}
+
+void StoreSaveChecksum(uint8_t* save) {
+  uint32_t sum = uint32_t(kSaveSize - 4);
+  for (size_t i = 4; i < kSaveSize; ++i) {
+    sum += save[i];
+  }
+  save[0] = uint8_t(sum >> 24);
+  save[1] = uint8_t(sum >> 16);
+  save[2] = uint8_t(sum >> 8);
+  save[3] = uint8_t(sum);
+}
+
+void UnlockEverything() {
+  if (rex::net::IsGameSessionOpen()) {
+    SetUnlockStatus("Not during an online session.", true);
+    return;
+  }
+  if (g_imported) {
+    SetUnlockStatus("A save was imported: restart the game first.", true);
+    return;
+  }
+  rex::Runtime* runtime = rex::Runtime::instance();
+  rex::memory::Memory* memory = runtime ? runtime->memory() : nullptr;
+  rex::system::xam::ContentManager* content = GetContentManager();
+  if (!memory || !content) {
+    SetUnlockStatus("The game isn't running yet.", true);
+    return;
+  }
+  const uint32_t block =
+      rex::memory::load_and_swap<uint32_t>(memory->TranslateVirtual<uint8_t*>(kSavePointer));
+  if (!block) {
+    SetUnlockStatus("The game hasn't loaded its save yet - try again in the menus.", true);
+    return;
+  }
+  uint8_t* live = memory->TranslateVirtual<uint8_t*>(block + kSaveImageOffset);
+
+  // The game can't open (save or load) its save while this runs. Not while
+  // it has it open: it's saving or loading right now.
+  if (!content->BlockContentAccess()) {
+    SetUnlockStatus("The game is saving right now - try again in a moment.", true);
+    return;
+  }
+  struct Unblock {
+    rex::system::xam::ContentManager* content;
+    ~Unblock() { content->UnblockContentAccess(); }
+  } unblock{content};
+
+  // The save on disk: backed up as it is, then given the same unlocks.
+  const std::filesystem::path path = SaveFilePath();
+  std::error_code error;
+  std::vector<uint8_t> disk;
+  const bool on_disk = std::filesystem::exists(path, error);
+  std::filesystem::path backup = path;
+  backup += ".bak_unlock";
+  if (on_disk) {
+    if (!ReadWholeFile(path, disk, 1024 * 1024)) {
+      SetUnlockStatus("Can't read the save file - nothing changed.", true);
+      return;
+    }
+    if (std::string check = CheckSave(disk); !check.empty()) {
+      SetUnlockStatus("Nothing changed: " + check, true);
+      return;
+    }
+    if (!WriteWholeFile(backup, disk)) {
+      SetUnlockStatus("Can't write the backup " + PathString(backup.filename()) +
+                          " - nothing changed.",
+                      true);
+      return;
+    }
+  }
+
+  // The save in memory: what the game shows and writes at its next save.
+  const size_t changed = ApplyUnlocks(live);
+  StoreSaveChecksum(live);
+
+  if (!on_disk) {
+    if (changed) {
+      SetUnlockStatus("Everything is unlocked for this session. There's no save on this PC "
+                      "(no storage was picked at the title), so it isn't kept.",
+                      true);
+    } else {
+      SetUnlockStatus("Everything was already unlocked.", false);
+    }
+    return;
+  }
+  const size_t changed_on_disk = ApplyUnlocks(disk.data());
+  if (changed_on_disk) {
+    StoreSaveChecksum(disk.data());
+    if (!WriteWholeFile(path, disk)) {
+      SetUnlockStatus("Unlocked for now, but the save couldn't be written - it's kept after "
+                      "the game's next save.",
+                      true);
+      return;
+    }
+  }
+  if (!changed && !changed_on_disk) {
+    SetUnlockStatus("Everything was already unlocked.", false);
+    return;
+  }
+  SetUnlockStatus(fmt::format("Everything is unlocked (100%) and saved. Backup: {}.",
+                              PathString(backup.filename())),
+                  false);
+}
+
+void UnlockEverythingCommand() { UnlockEverything(); }
+
 void SaveExportCommand() { ExportSave(); }
 void SaveImportCommand(std::string_view args) { ImportSave(std::string(args)); }
 
@@ -807,6 +1083,8 @@ REXCVAR_DEFINE_COMMAND(save_export, SaveExportCommand, "Saves",
                        "Export the save to <exe>\\saves (like the settings menu)");
 REXCVAR_DEFINE_COMMAND_ARGS(save_import, SaveImportCommand, "Saves",
                             "Import a save: <file or folder in saves, or a full path>");
+REXCVAR_DEFINE_COMMAND(unlock_everything, UnlockEverythingCommand, "Saves",
+                       "Unlock everything (the settings menu item, without its confirm step)");
 
 void BurstLimitSavesSetup(const std::filesystem::path& exe_directory,
                           const std::filesystem::path& user_data_root) {
@@ -849,6 +1127,48 @@ void BurstLimitSavesMenu(rex::ui::QuickMenuConfig& menu) {
   open_item.action = [](const std::string&) {
     OpenSavesFolder({});
     SetStatus("Opened " + ShortName(SavesFolder()) + ".", false);
+  };
+}
+
+// GAME tab: "Unlock everything", with a confirm step (A twice) and its own
+// result line.
+void BurstLimitUnlockMenu(rex::ui::QuickMenuSection& section) {
+  using Item = rex::ui::QuickMenuItem;
+  section.status = []() {
+    std::lock_guard<std::mutex> lock(g_unlock_status_mutex);
+    return g_unlock_status;
+  };
+  Item& item = section.items.emplace_back();
+  item.kind = Item::Kind::kAction;
+  item.label = "Unlock everything";
+  item.empty_text = "Offline only";
+  item.help =
+      "Unlocks all characters, forms, stages and extras (like a 100% save). Your records and "
+      "progress are kept. A backup of the save is made first.";
+  // One entry: "Unlock", then "Press A again" while armed; none online.
+  item.list = []() -> std::vector<std::pair<std::string, std::string>> {
+    if (rex::net::IsGameSessionOpen()) {
+      return {};
+    }
+    if (std::chrono::steady_clock::now() < g_unlock_armed_until) {
+      return {{"confirm", "Press A again"}};
+    }
+    return {{"unlock", "Unlock"}};
+  };
+  item.action = [](const std::string&) {
+    if (rex::net::IsGameSessionOpen()) {
+      SetUnlockStatus("Not during an online session.", true);
+      return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= g_unlock_armed_until) {
+      g_unlock_armed_until = now + std::chrono::seconds(10);
+      SetUnlockStatus("Press A again to unlock everything (a backup of the save is made first).",
+                      false);
+      return;
+    }
+    g_unlock_armed_until = {};
+    UnlockEverything();
   };
 }
 
