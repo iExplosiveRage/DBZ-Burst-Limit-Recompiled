@@ -51,6 +51,14 @@ REXCVAR_DEFINE_STRING(online_input_delay, "4", "Patches",
     .allowed({"off", "2", "3", "4", "5", "6", "7", "8"})
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
+REXCVAR_DEFINE_STRING(input_delay, "reduced", "Patches",
+                      "Offline fights (Training, Versus, Z Chronicles...): original = the "
+                      "game's own input delay of 3 frames (50 ms), as on the Xbox 360; reduced = "
+                      "none, a press acts on the next game frame. Applies from the next fight. "
+                      "Online always uses its own delay (online_input_delay).")
+    .allowed({"original", "reduced"})
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 REXCVAR_DEFINE_BOOL(online_input_channel, true, "Patches",
                     "Online (lobby): send every frame's input right away over the connection's "
                     "side channel (off = only the game's own 3-frame packs, for comparisons).")
@@ -92,6 +100,7 @@ constexpr uint32_t kTickFrame = 1588;       // frame of the current driver call
 constexpr uint32_t kSubmittedFrame = 1592;  // last local frame packed
 constexpr uint32_t kDriverState = 1632;     // 3 = online match
 constexpr uint32_t kDriverStateMatch = 3;
+constexpr uint32_t kDriverStateOffline = 0;  // sub_8217E808: local input, consumed 3 frames late
 
 // The game's local input history (12 slots by frame % 12): +0 frame,
 // +48 status B, +96 player, +144 status A, +208 u64 command.
@@ -480,6 +489,10 @@ void BurstLimitNetInputSetup() {
   rex::net::online::SetGameSideHandler(OnGameSide);
 }
 
+// Offline fights without the game's 3-frame input delay (input_delay =
+// reduced), latched at the match input reset.
+static std::atomic<bool> g_offline_reduced{false};
+
 /// The exact input delay of the running online match (0 = the game's timing).
 int BurstLimitOnlineDelayFrames() {
   return g_delay.load(std::memory_order_relaxed);
@@ -545,6 +558,8 @@ void BurstLimitOnlineResetFrame(PPCRegister& r9) {
   }
   g_delay.store(delay);
   g_start_frame.store(start);
+  // Offline: the input delay option, fixed for the whole fight.
+  g_offline_reduced.store(!rex::net::IsGameSessionOpen() && REXCVAR_GET(input_delay) == "reduced");
   if (online) {
     REXLOG_WARN("[OnlineInput] match reset: delay {} (first frame {}), input channel {}, "
                 "desync check {}",
@@ -588,6 +603,18 @@ void BurstLimitOnlineFightStartFrame(PPCRegister& r3, PPCCRRegister& cr6) {
 void BurstLimitOnlineConsumeFrame(PPCRegister& r5, PPCRegister& r10) {
   const int delay = g_delay.load(std::memory_order_relaxed);
   if (!delay) {
+    // Offline (driver state 0, no game session): input_delay reduced takes
+    // the frame the driver has just written (sub_8217E808 writes both
+    // players' commands at the tick frame, then consumes) instead of the one
+    // 3 frames back. Online (state 3, or any open session) is never touched.
+    if (g_offline_reduced.load(std::memory_order_relaxed) && !rex::net::IsGameSessionOpen()) {
+      if (auto* memory = GuestMemory()) {
+        const uint32_t manager = LoadU32(memory, kInputManagerPointer);
+        if (manager && LoadU32(memory, manager + kDriverState) == kDriverStateOffline) {
+          r5.s64 = int64_t(r10.s32);
+        }
+      }
+    }
     return;
   }
   auto* memory = GuestMemory();

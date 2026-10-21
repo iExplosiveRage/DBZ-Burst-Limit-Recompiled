@@ -29,3 +29,8 @@
 # IDE
 /.vs/
 /.vscode/
+
+# Shader seed / ahead-of-time shader pack: made from the game's own shaders (guest microcode,
+# DXIL compiled from it) - game data, local only, never committed or shipped.
+/res/shader_seed/
+/res/shader_pack/*.xaot

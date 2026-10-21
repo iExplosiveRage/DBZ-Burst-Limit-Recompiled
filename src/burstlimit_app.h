@@ -389,13 +389,23 @@ class BurstlimitApp : public rex::ReXApp {
         "960x540 or 640x360 (Lower resolution), NVIDIA DLSS / AMD FSR and the picture filters "
         "off, the blur EFFECTS off, at most 60 FPS. Changing one of those afterwards shows "
         "Custom again."));
-    // Y: a wider picture raises the X scale with it (burstlimit_widescreen.cpp).
-    Item& resolution = display.items.emplace_back(choice(
-        "Resolution", "draw_resolution_scale_y",
-        {{"1", "1280x720"}, {"2", "2560x1440"}, {"3", "3840x2160 (4K)"}, {"4", "5120x2880"}},
-        "The resolution the game renders at (its height - a wider picture renders wider too). "
-        "Higher is sharper but needs a faster GPU."));
-    resolution.mirrored_cvars = {"draw_resolution_scale_x", "resolution_scale"};
+    // By the height (any resolution in the native renderer); the whole scale
+    // follows it (burstlimit_patches.cpp), a wider picture raises the X scale
+    // with it (burstlimit_widescreen.cpp).
+    display.items.push_back(choice(
+        "Resolution", "draw_resolution_height",
+        {{"720", "1280x720 (720p)"},
+         {"1080", "1920x1080 (1080p)"},
+         {"1440", "2560x1440 (1440p)"},
+         {"2160", "3840x2160 (4K)"},
+         {"2880", "5120x2880 (5K)"},
+         {"3240", "5760x3240 (6K)"},
+         {"4320", "7680x4320 (8K)"}},
+        "The resolution the game renders at, or that NVIDIA DLSS / AMD FSR (GRAPHICS) upscale "
+        "to (its height - a wider picture renders wider too). Higher is sharper but needs a "
+        "faster GPU; 6K and 8K need a lot of video memory. 1080p and 6K: Native renderer only - "
+        "the Emulated renderer renders whole steps of 720p, so it draws them at 2560x1440 and "
+        "6400x3600."));
     // Below 1280x720 (draw_resolution_percent): only at the 1x Resolution.
     Item& low_resolution = display.items.emplace_back(choice(
         "Lower resolution", "draw_resolution_percent",
@@ -435,10 +445,21 @@ class BurstlimitApp : public rex::ReXApp {
     fps_position.shown_if_cvar = "debug_overlay";
     fps_position.shown_if_values = {"true"};
     display.items.push_back(choice(
+        "Renderer", "gpu_native_renderer", {{"false", "Emulated"}, {"true", "Native"}},
+        "How the game's drawing reaches your GPU. Native is the new, faster renderer: it draws "
+        "with the PC's graphics API right at the game's own drawing calls instead of through an "
+        "emulated Xbox 360 GPU (more FPS with a high or unlocked frame rate, most on CPUs with "
+        "few cores). Emulated is the classic path - use it if something looks wrong. Applies "
+        "after restarting the game."));
+    Item& render_path = display.items.emplace_back(choice(
         "Render path", "render_target_path_d3d12",
         {{"", "Auto (fast)"}, {"rov", "Compatibility (ROV)"}},
         "How the GPU draws the game. Use Compatibility only if the picture looks broken (for "
         "example on old Intel graphics drivers) - it is much slower. Applies after a restart."));
+    // The native renderer always draws the fast way (both rows are for the
+    // next start).
+    render_path.shown_if_cvar = "gpu_native_renderer";
+    render_path.shown_if_values = {"false"};
 
     rex::ui::QuickMenuSection& graphics = menu.sections.emplace_back();
     graphics.title = "GRAPHICS";
@@ -452,10 +473,11 @@ class BurstlimitApp : public rex::ReXApp {
          {"ultra_performance", "Ultra Performance"}},
         "NVIDIA's AI anti-aliasing and upscaling for the 3D scene (RTX GPUs). DLAA keeps the "
         "Resolution (DISPLAY); Quality to Ultra Performance render below it and upscale the "
-        "scene to it, for more FPS, with the HUD drawn at the full resolution. Only whole steps "
-        "exist: at 4K, Quality to Performance render at 2560x1440 and Ultra Performance at "
-        "1280x720; at 2560x1440 every mode renders at 1280x720; at 1280x720 there's nothing "
-        "lower, so every mode is DLAA."));
+        "scene to it, for more FPS, with the HUD drawn at the full resolution. Native renderer: "
+        "at NVIDIA's own ratio of any Resolution, like a PC game - Quality 66.7%, Balanced 58%, "
+        "Performance 50%, Ultra Performance 33.3%, in steps of 5% of a whole scale of 720p (4K "
+        "Balanced renders at 2176x1224, 1440p Quality at 1664x936). Emulated "
+        "renderer: only whole steps of 720p (at 4K, Quality to Performance render at 2560x1440)."));
     Item& dlss_preset = graphics.items.emplace_back(choice(
         "DLSS model", "dlss_preset", {{"k", "K"}, {"l", "L"}, {"m", "M"}},
         "NVIDIA's DLSS models. M is sharper and more stable than K; L is like M but slower "
@@ -475,7 +497,9 @@ class BurstlimitApp : public rex::ReXApp {
         "turns the other off): FSR 4 on AMD RX 9000 and RX 7000 GPUs, FSR 3.1.5 on any other. "
         "Native AA keeps the Resolution (DISPLAY); Quality to Ultra Performance render below it "
         "and upscale the scene to it, for more FPS, with the HUD drawn at the full resolution. "
-        "Only whole steps exist, like DLSS's."));
+        "Native renderer: at AMD's own ratio of any Resolution (Quality 67%, Balanced 59%, "
+        "Performance 50%, Ultra Performance 33%, in steps like DLSS's). Emulated renderer: only "
+        "whole steps of 720p."));
     Item& fsr_scene_sharpness = graphics.items.emplace_back(
         number("FSR sharpness", "fsr_sharpness", 0.0, 1.0, 0.1,
                "Sharpening after AMD FSR (0 = off)."));
@@ -567,6 +591,13 @@ class BurstlimitApp : public rex::ReXApp {
 
     rex::ui::QuickMenuSection& game = menu.sections.emplace_back();
     game.title = "GAME";
+    game.items.push_back(choice(
+        "Input delay", "input_delay",
+        {{"reduced", "Reduced"}, {"original", "Original"}},
+        "Offline fights: Original keeps the game's own 3 frames (50 ms) between a press and "
+        "its move, as on the Xbox 360. Reduced removes them - the move starts on the next "
+        "frame (the CPU fighter answers sooner too). From the next fight. Online always uses "
+        "Online input delay."));
     game.items.push_back(toggle(
         "Ki charge (hold L3)", "ki_charge",
         "Hold L3 (press the left stick) in a fight to power up and fill the Ki gauge faster, "

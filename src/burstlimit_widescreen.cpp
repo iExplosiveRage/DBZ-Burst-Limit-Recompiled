@@ -77,8 +77,20 @@ float ConfiguredAspect() {
 }
 
 // draw_resolution_scale_x for the picture's shape: as many guest pixels
-// across as the output shows (Y scale * aspect / (16/9)), whole, at most 7.
+// across as the output shows (Y scale * aspect / (16/9)), whole, at most 7 -
+// exactly the Y scale at 16:9. The one place the X scale is made: the
+// Resolution (burstlimit_patches.cpp), the graphics presets, a Y scale or
+// aspect ratio change and an X scale set by hand all end here, so an X scale
+// left from an earlier Resolution (8K -> 1440p kept 6x) can't stay behind.
 // NVIDIA DLSS / AMD FSR take the X and Y scales each on its own.
+int DrawScaleXForY(int y, float aspect) {
+  y = std::clamp(y, 1, 7);
+  if (aspect <= kGuestAspect * 1.001f) {
+    return y;
+  }
+  return std::clamp(int(std::ceil(float(y) * aspect / kGuestAspect - 0.05f)), y, 7);
+}
+
 void ReconcileDrawScale(float aspect) {
   // The Y scale as the GPU takes it: resolution_scale when only that is set.
   const char* y_name = rex::cvar::HasNonDefaultValue("resolution_scale") &&
@@ -91,17 +103,7 @@ void ReconcileDrawScale(float aspect) {
   } catch (...) {
     return;
   }
-  y = std::clamp(y, 1, 7);
-  const bool wide = aspect > kGuestAspect * 1.001f;
-  // At 16:9 only undo what this did (an X scale set by hand stays).
-  static bool changed_x = false;
-  if (!wide && !changed_x) {
-    return;
-  }
-  int x = y;
-  if (wide) {
-    x = std::clamp(int(std::ceil(float(y) * aspect / kGuestAspect - 0.05f)), y, 7);
-  }
+  const int x = DrawScaleXForY(y, aspect);
   int current = 0;
   try {
     current = std::stoi(rex::cvar::GetFlagByName("draw_resolution_scale_x"));
@@ -110,10 +112,14 @@ void ReconcileDrawScale(float aspect) {
   if (current != x) {
     REXLOG_INFO("Widescreen: aspect {:.3f}, draw_resolution_scale_x {} -> {} (y {})", aspect,
                 current, x, y);
-    changed_x = wide;
     rex::cvar::SetFlagByName("draw_resolution_scale_x", std::to_string(x));
   }
 }
+
+// Update() and BurstLimitSyncDrawScaleX(): from the polling thread and from
+// cvar callbacks (also the ones the X scale change sets off, on the same
+// thread).
+std::recursive_mutex g_update_mutex;
 
 // Online (and with widescreen_debug_gpu_projection) the GPU widens the
 // scene instead of the game's projections.
@@ -122,10 +128,7 @@ bool GpuProjection() {
 }
 
 void Update() {
-  // From the polling thread and from cvar callbacks (also the ones the X
-  // scale change below sets off, on the same thread).
-  static std::recursive_mutex mutex;
-  std::lock_guard<std::recursive_mutex> lock(mutex);
+  std::lock_guard<std::recursive_mutex> lock(g_update_mutex);
   const float aspect = ConfiguredAspect();
   const bool wide = aspect > kGuestAspect * 1.001f;
   const float scale_x = wide ? kGuestAspect / aspect : 1.0f;
@@ -257,9 +260,12 @@ bool OverlayExtent(const rex::graphics::OverlayDrawInfo& info, Extent& e) {
 // The pieces of the battle HUD that belong to a side (from the draws'
 // logged with widescreen_debug_log): sprites of the life bar / portrait /
 // ki gauge textures in the top and bottom bands, and the bars, names and
-// gauge shapes drawn there as triangles. Not the hit counter (384x128 text,
-// middle left), "First attack" messages or the Ultimate prompt (152x72 at the
-// bottom, between the gauges).
+// gauge shapes drawn there as triangles, the ki-full lightning (152x72 sprite
+// flickering over a full ki gauge) and the button prompts above the ki gauge
+// (32x32 pictures, the Training input row), and each side's combo counter
+// under its life bar ("4 HITS / 493 DAMAGE": 384x128 digits and words, the
+// 1280x120 "DAMAGE", its 32x32 panel, the 384x128 sprite sliding in) - the
+// band y 0.2-0.52, away from the middle.
 bool IsSideHudPiece(const rex::graphics::OverlayDrawInfo& info, const Extent& e) {
   const uint32_t w = info.texture0_width, h = info.texture0_height;
   auto is = [w, h](uint32_t tw, uint32_t th) { return w == tw && h == th; };
@@ -269,6 +275,8 @@ bool IsSideHudPiece(const rex::graphics::OverlayDrawInfo& info, const Extent& e)
                      is(96, 64);
   // Which side: the piece reaches out towards that side's edge.
   const bool outer = (e.right <= 0.0f && e.left <= -0.6f) || (e.left >= 0.0f && e.right >= 0.6f);
+  // The combo counter's band, under the life bar on its side.
+  const bool combo = e.bottom >= 0.2f && e.top <= 0.52f && (e.right <= -0.3f || e.left >= 0.3f);
   if (info.vertex_shader_hash == kSpriteVertexShader ||
       info.vertex_shader_hash == kPictureVertexShader) {
     // Sprites and pictures (the portrait's hurt / KO faces are pictures).
@@ -281,16 +289,27 @@ bool IsSideHudPiece(const rex::graphics::OverlayDrawInfo& info, const Extent& e)
         {512, 68},   // ki gauge segments
         {512, 32},   // ki gauge last segment
         {80, 80},    // ki gauge orb
+        {152, 72},   // ki gauge full: the lightning over it
     };
     bool known = false;
     for (const auto& size : kTextures) {
       known |= is(size[0], size[1]);
     }
-    return (known && (e.bottom >= 0.45f || e.top <= -0.55f)) || (drama && e.bottom >= 0.4f);
+    // Button prompts (the Training input row) over the ki gauge: 32x32
+    // pictures in the bottom band.
+    const bool prompt = info.vertex_shader_hash == kPictureVertexShader && is(32, 32) &&
+                        e.top <= -0.55f && e.bottom >= -0.95f;
+    return (known && (e.bottom >= 0.45f || e.top <= -0.55f)) || prompt ||
+           (info.vertex_shader_hash == kSpriteVertexShader && is(384, 128) && combo) ||
+           (drama && e.bottom >= 0.4f);
   }
   if (info.vertex_shader_hash == kShapeVertexShader) {
     if (drama) {
       return e.bottom >= 0.4f;
+    }
+    // The combo counter (text, and the panel behind its damage line).
+    if ((is(384, 128) || is(1280, 120) || is(32, 32)) && combo) {
+      return true;
     }
     // Text: the names over the bars and a drama piece's name under its bar -
     // only when it reaches out to the side (a pause menu's title near the
@@ -355,7 +374,7 @@ rex::graphics::OverlayPlacement PlaceOverlay(const rex::graphics::OverlayDrawInf
     placement.scale_x = k;
     // The battle HUD's sides - life bars, names, portraits at the top, the
     // ki gauges at the bottom - go to the edges of the wide screen. The rest
-    // (timer, hit counter, messages, button prompts) stays where it is in
+    // (timer, middle messages) stays where it is in
     // the 16:9 middle.
     if (has_extent && g_hud_edges.load(std::memory_order_relaxed) && battle.active &&
         IsSideHudPiece(info, e)) {
@@ -413,4 +432,11 @@ WidescreenSetup g_widescreen_setup;
 // WidenProjection (burstlimit_patches.cpp).
 float BurstLimitWidescreenProjectionScaleX() {
   return GpuProjection() ? 1.0f : g_scale_x.load(std::memory_order_relaxed);
+}
+
+// draw_resolution_scale_x from the current Y scale and aspect ratio
+// (DrawScaleXForY), for the Resolution and the graphics presets.
+void BurstLimitSyncDrawScaleX() {
+  std::lock_guard<std::recursive_mutex> lock(g_update_mutex);
+  ReconcileDrawScale(ConfiguredAspect());
 }

@@ -30,6 +30,9 @@ set(BURSTLIMIT_SOURCES
     src/burstlimit_menuart.cpp
     src/burstlimit_menusound.cpp
     src/burstlimit_mods.cpp
+    src/burstlimit_native.cpp
+    src/burstlimit_native_device.cpp
+    src/burstlimit_native_scope.cpp
     src/burstlimit_netinput.cpp
     src/burstlimit_online.cpp
     src/burstlimit_online_rules.cpp

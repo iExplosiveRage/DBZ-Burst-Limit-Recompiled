@@ -49,6 +49,21 @@ normal Windows program instead of inside an emulator.
 - **Fast render path on Intel GPUs** (since 0.6.2): Intel used a much slower path (about 2.4x slower on an
   integrated GPU); now every GPU uses the fast one. If the picture looks broken (old Intel drivers), DISPLAY >
   **Render path** > Compatibility (after a restart).
+- **Native renderer** (since 0.7.0, the default): the game's drawing calls go straight to the PC's graphics API
+  instead of through an emulated Xbox 360 GPU - on an RTX 4080, unlocked: 1440p 330 -> 612 FPS, 4K 358 -> 424 FPS;
+  PCs limited by the CPU gain the most (close to 2x). **Emulated** (DISPLAY > **Renderer**, after restarting the
+  game) is the classic path; switch back to it if something looks wrong. The log says which one runs
+  (`Native renderer: on`).
+- **Any resolution** (since 0.7.0): DISPLAY > **Resolution** 720p, 1080p, 1440p, 4K, 5K, 6K or 8K
+  (`draw_resolution_height`; 1080p and 6K with the Native renderer). With the Native renderer, NVIDIA DLSS / AMD
+  FSR modes render at the same sizes as in PC games (DLSS Quality 66.7%, Balanced 58%, Performance 50%, Ultra
+  Performance 33.3%), and frame times with DLSS / DLAA are steadier.
+- **Shader warm-up**: shaders and pipelines the game has used are saved in the shader cache and built while the
+  game loads, so they don't stutter again. `gpu_shader_storage_seed` also merges a `shader_seed` folder next to
+  the exe, if there is one (none is shipped: it would hold the game's own shader code).
+- **Online fights at 60 FPS** (since 0.7.0, `online_frame_rate_cap`): with a higher frame rate setting, online
+  sessions are held at 60 so both players run at the same speed.
+- **Long sessions** (since 0.7.0): fixed the game slowly getting slower the longer it ran.
 - **Graphics preset** (since 0.6.2, #15): DISPLAY > Graphics preset **Low-end PC** (960x540) or **Lowest**
   (640x360) sets everything for a weak laptop at once: lower resolution, no upscalers or picture filters, blur
   effects off, at most 60 FPS.
@@ -139,6 +154,10 @@ normal Windows program instead of inside an emulator.
 - **Ki charge** (`ki_charge`, `ki_charge_rate`, off by default): hold **L3** to charge Ki, like Shin Budokai - on
   the ground or in the air, with a finishing pose when the gauge is full, the Aura Spark motion and wind / dust in
   your aura's color. Works online (the host's setting is used by both players).
+- **Lower input latency offline** (`input_delay`, F1 > GAME > Input delay): the game runs every press 3 frames
+  (50 ms) late in offline fights too, the same delay its online code uses. **Reduced** (the default) acts on the
+  next frame; **Original** keeps the Xbox 360 timing. Controllers are also read at the moment the game asks
+  (`input_poll_on_read`) instead of using the state from the game's previous read. Online is unchanged.
 - **"Online" instead of "Xbox LIVE"** (`online_branding`): the menus' text and the **Online Battle** title.
 - **Save export / import** (Settings > Save): your save as a zip in the `saves` folder next to `burstlimit.exe`,
   and back - also saves exported from Xenia. The current save is backed up first.
@@ -400,6 +419,9 @@ settings menu (F1). Any setting can also be passed on the command line, e.g. `--
 | `draw_resolution_scale_x/y` | `1` | Internal resolution scale: `1` = 720p, `2` = 1440p, `3` = 4K (sharper, heavier). With a wider `aspect_ratio`, X is raised to match (set Y; the settings menu's **Resolution** does). |
 | `draw_resolution_percent` | `100` | Below 720p for slow GPUs (**Lower resolution** in DISPLAY): with the scale at `1`, the game renders at this percent of 1280x720 (`75` = 960x540, `50` = 640x360, 25-100) and the picture is stretched to the window. Off while DLSS / AMD FSR scene modes are on. |
 | `graphics_preset` | `custom` | **Graphics preset** in DISPLAY: `low_end` = 1280x720 drawn at 960x540, `lowest` = at 640x360, both with DLSS / AMD FSR, picture filters and the blur effects off and at most 60 FPS. Changing one of those settings afterwards shows `custom` again. |
+| `draw_resolution_height` | `0` | **Resolution** in DISPLAY by its height: `720`, `1080`, `1440`, `2160` (4K), `2880` (5K), `3240` (6K), `4320` (8K); sets the scale (a wider `aspect_ratio` renders wider). `0` = use `draw_resolution_scale_x/y`. 1080p and 6K need the Native renderer (Emulated draws them at the next whole step of 720p). |
+| `gpu_native_renderer` | `true` | **Renderer** in DISPLAY (after a restart): `true` = Native (the default, faster), `false` = Emulated (the classic path; use it if something looks wrong). |
+| `gpu_shader_storage_seed` | `true` | Merge the shaders / pipelines of a `shader_seed` folder next to the exe into the shader cache at startup (none is shipped). |
 | `render_target_path_d3d12` | *(empty)* | **Render path** in DISPLAY (after a restart): empty = the fast path on every GPU, `rov` = Compatibility (much slower; only if the picture looks broken, e.g. on old Intel drivers). |
 | `d3d12_adapter` | `-1` | Which GPU: `-1` = the most powerful one, `0`, `1`, ... = the `DXGI adapter N` lines at the top of `burstlimit.log`. |
 | `present_effect` | `bilinear` | `bilinear` (off), `cas` (sharpening), `fsr`, `fsr2`, `fsr3` (AMD FSR upscaling). |
@@ -411,9 +433,9 @@ settings menu (F1). Any setting can also be passed on the command line, e.g. `--
 | `free_camera` | `false` | Free camera (always off at startup). |
 | `freeze_game` | `false` | Stops the fight and its cinematics for the free camera, offline only (always off at startup). |
 | `bind_free_camera` / `bind_freeze_game` | `Insert` / `Numpad0` | Keyboard keys for the free camera and freeze. |
-| `dlss_mode` | `off` | NVIDIA DLSS (RTX GPUs, experimental): `dlaa` (anti-aliasing at the chosen resolution), or `quality`, `balanced`, `performance`, `ultra_performance` (render lower and upscale; in whole steps of the resolution scale - at 4K the first three render at 1440p and `ultra_performance` at 720p). |
+| `dlss_mode` | `off` | NVIDIA DLSS (RTX GPUs, experimental): `dlaa` (anti-aliasing at the chosen resolution), or `quality`, `balanced`, `performance`, `ultra_performance` (render lower and upscale). Native renderer: at NVIDIA's own ratio of any resolution, like a PC game (66.7% / 58% / 50% / 33.3%); Emulated: in whole steps of 720p (at 4K the first three render at 1440p and `ultra_performance` at 720p). |
 | `dlss_preset` | `m` | DLSS model: `k`, `l` or `m`. |
-| `fsr_mode` | `off` | AMD FSR for the 3D scene (FSR 4 on GPUs that have it, FSR 3.1.5 elsewhere), used while `dlss_mode` is off: `native_aa`, or `quality`, `balanced`, `performance`, `ultra_performance` (render lower and upscale, in whole steps like DLSS). |
+| `fsr_mode` | `off` | AMD FSR for the 3D scene (FSR 4 on GPUs that have it, FSR 3.1.5 elsewhere), used while `dlss_mode` is off: `native_aa`, or `quality`, `balanced`, `performance`, `ultra_performance` (render lower and upscale; Native renderer: AMD's own ratios 67% / 59% / 50% / 33%, Emulated: whole steps like DLSS). |
 | `fsr_sharpness` | `0` | AMD FSR's sharpening, `0` (off) to `1`. |
 | `fsr_version` | `auto` | `auto` (the newest the GPU has), `4` or `3`. |
 | `texture_lod_bias` | `0` | Texture detail: negative = sharper distant textures (-1 is NVIDIA's advice with DLSS). |
@@ -422,6 +444,7 @@ settings menu (F1). Any setting can also be passed on the command line, e.g. `--
 | `story_costumes` | `true` | The four Z Chronicles costumes on the character select. |
 | `extra_stages` | `true` | The three Z Chronicles stages on the Versus / Training stage select (offline). |
 | `extra_characters` | `true` | Extra characters from mods (`slot.toml`): R2 on the Versus / Training character select shows them (offline). |
+| `input_delay` | `reduced` | Offline fights: `reduced` = no extra delay, `original` = the game's own 3 frames. From the next fight; online uses `online_input_delay`. |
 | `ki_charge` | `false` | Hold L3 to charge Ki (Shin Budokai style). Online: the host's value is used by both. |
 | `ki_charge_rate` | `16` | Ki added per frame while charging (the gauge holds 3000). |
 | `mods_enabled` | `true` | Use the mods switched on in the Mods menu (`mods\mods.toml`). |
@@ -434,6 +457,7 @@ settings menu (F1). Any setting can also be passed on the command line, e.g. `--
 | `online_lobby_url` | *(empty)* | Lobby server WebSocket URL (`wss://.../v1/ws`). The release `burstlimit.toml` sets it to the project's lobby. Empty = LAN / Radmin VPN only. |
 | `online_mode` | `auto` | `auto`: the lobby when `online_lobby_url` is set and `REX_XNET_IP` / `REX_XNET_SEARCH_IP` are not (so `Host_Online.bat` / `Join_Online.bat` keep the old way); `lobby` / `direct` force one. |
 | `online_name` | *(empty)* | Your name in the lobby and in the game (max 15 printable ASCII characters). Empty = the Windows user name. |
+| `online_frame_rate_cap` | `true` | Online sessions run at 60 FPS whatever `frame_rate` is (both players the same speed). |
 | `online_input_delay` | `4` | Lobby matches: input delay in frames (`2`-`8`), or `off` for the game's own timing (`online_tick_sleep`). The host's value is used by both players. |
 | `online_rules_host_health/attack/defense`, `online_rules_guest_health/attack/defense`, `online_rules_cutscenes` | `3` / `room` | Player Match rooms you host: the room rules you picked last (Health 1-8 bars, Attack and Defense 1-5, cut-scenes `room` / `on` / `off`), the menu's defaults for the next guest. |
 | `online_input_channel` | `true` | Lobby matches: send every frame's input right away (off = only the game's own 3-frame packs). |
@@ -523,7 +547,7 @@ Ranked Match and the older Radmin VPN / LAN way keep the game's rules and show n
   wins, losses and favourite character (`ranked_overlay`). The gamer card shows a player's record. The same
   rankings are in the settings menu: F1 -> ONLINE -> **Online rankings**.
 - The first time you go online, the game gets an online identity from the lobby (saved as
-  `Documentsurstlimit\online_identity.json`, next to your saves). Keep that file to keep your record.
+  `Documents\burstlimit\online_identity.json`, next to your saves). Keep that file to keep your record.
 
 ### Older method: Radmin VPN / LAN
 

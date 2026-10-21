@@ -1,0 +1,18 @@
+# Shaders left out of the ahead-of-time pack (the runtime translation draws them): they changed the picture
+# beyond float precision in the per-pipeline A/B (runs\res_e_bis.txt, Training Plains, idle + explosion, 1x).
+# 4A56087EF49DF636 is a depth-export PS (no float24 conversion in the pack); 053A528AF0EE971D pairs with it.
+053A528AF0EE971D
+4A56087EF49DF636
+12471479D8A443C4
+36F7490C927A2FAD
+5882626AB5121A7F
+7B8417F0A8A6A2FE
+93C2E5C178BAEC88
+D4474610606DD1FB
+EC9B52789DD888F2
+B5AF955620ECF5E5
+C3F51B686504B51A
+# the other depth-export PS (not seen in the test fight)
+010B8F6A9ECC34C6
+B6A55DAC2FB38CB8
+D74A5DAE8A193E23

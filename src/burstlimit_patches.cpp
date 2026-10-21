@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdint>
+#include <cstdlib>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -18,6 +19,7 @@
 #include <rex/memory.h>
 #include <rex/memory/utils.h>
 #include <rex/net/session.h>
+#include <rex/perf/frame_rate.h>
 #include <rex/ppc.h>
 #include <rex/ppc/context.h>
 #include <rex/runtime.h>
@@ -41,6 +43,19 @@ REXCVAR_DEFINE_BOOL(online_fast_tick, true, "Patches",
 REXCVAR_DEFINE_INT32(online_tick_sleep, 1, "Patches",
                      "Online: frames the match driver sleeps between input ticks (0 = LAN, 1 = good "
                      "ping, 2 = average ping, 3 = game default). Both players must use the same value.")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+// Online the battle runs one lockstep input tick per 60 Hz frame, but parts of
+// the game run per rendered frame: with frame_rate unlocked (300-600 FPS) a
+// native host closed a healthy session in the middle of a fight ("Connection
+// with other player has been lost" while link, inputs and the desync hash were
+// fine, 2026-10-20 runs\online e_unl_ne) - most likely a check that counts
+// frames. The battle ticks at 60 Hz there anyway (600 ticks per 10 s at 389
+// FPS), so while a game session is open the guest vblank is held at 60 Hz,
+// like the console. Off = your frame_rate online too.
+REXCVAR_DEFINE_BOOL(online_frame_rate_cap, true, "Patches",
+                    "Online: run at 60 FPS while a game session is open, whatever frame_rate says "
+                    "(higher rates shorten the game's frame-counted timeouts).")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 REXCVAR_DEFINE_BOOL(online_input_delay_test, true, "Patches",
@@ -86,6 +101,8 @@ REXCVAR_DEFINE_INT32(field_of_view, 100, "Patches",
                      "Field of view in percent of the game's (100 = original, 120 = 20% wider).")
     .range(50, 200)
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
+void BurstLimitSyncDrawScaleX();  // burstlimit_widescreen.cpp
 
 namespace {
 
@@ -281,13 +298,13 @@ void ApplyGraphicsPreset(const GraphicsPreset& preset) {
       rex::cvar::SetFlagByName(name, value);
     }
   }
-  // Like the Resolution setting (a wider aspect ratio raises the X scale again).
-  for (const char* name : {"draw_resolution_scale_y", "draw_resolution_scale_x",
-                           "resolution_scale"}) {
+  // Like the Resolution setting: Y 1x, X from it and the aspect ratio.
+  for (const char* name : {"draw_resolution_scale_y", "resolution_scale"}) {
     if (rex::cvar::GetFlagByName(name) != "1") {
       rex::cvar::SetFlagByName(name, "1");
     }
   }
+  BurstLimitSyncDrawScaleX();
   if (rex::cvar::GetFlagByName("draw_resolution_percent") != preset.draw_resolution_percent) {
     rex::cvar::SetFlagByName("draw_resolution_percent", preset.draw_resolution_percent);
   }
@@ -326,6 +343,53 @@ struct GraphicsPresetCvarCallbacks {
 };
 
 GraphicsPresetCvarCallbacks g_graphics_preset_cvar_callbacks;
+
+// Resolution (draw_resolution_height, any output height): the native renderer
+// renders at it exactly (1080p = 1.5x, 6K = 4.5x of 720p); the whole Y scale
+// follows it - the next whole step up, what the emulated renderer renders at
+// and what the ultrawide X scale is made from - and the other way around (the
+// graphics presets set the scale).
+int WholeScaleOfHeight(int height) { return std::clamp((height + 719) / 720, 1, 7); }
+
+// (An SDK setting, read by name.)
+int DrawResolutionHeight() {
+  return rex::cvar::GetFlagInfo("draw_resolution_height")
+             ? std::atoi(rex::cvar::GetFlagByName("draw_resolution_height").c_str())
+             : 0;
+}
+
+void SyncDrawScaleToHeight() {
+  const int height = DrawResolutionHeight();
+  if (height <= 0) {
+    return;
+  }
+  const std::string y = std::to_string(WholeScaleOfHeight(height));
+  for (const char* name : {"draw_resolution_scale_y", "resolution_scale"}) {
+    if (rex::cvar::GetFlagByName(name) != y) {
+      rex::cvar::SetFlagByName(name, y);
+    }
+  }
+  // X always from Y and the aspect ratio (= Y at 16:9), never kept from an
+  // earlier Resolution (only raising it left 8K's 6x at 1440p: 7680x1440).
+  BurstLimitSyncDrawScaleX();
+}
+
+struct DrawResolutionHeightCvarCallbacks {
+  DrawResolutionHeightCvarCallbacks() {
+    rex::cvar::RegisterChangeCallback(
+        "draw_resolution_height", [](std::string_view, std::string_view) { SyncDrawScaleToHeight(); });
+    rex::cvar::RegisterChangeCallback(
+        "draw_resolution_scale_y", [](std::string_view, std::string_view value) {
+          const int height = DrawResolutionHeight();
+          const int y = std::atoi(std::string(value).c_str());
+          if (height > 0 && y >= 1 && WholeScaleOfHeight(height) != y) {
+            rex::cvar::SetFlagByName("draw_resolution_height", std::to_string(720 * y));
+          }
+        });
+  }
+};
+
+DrawResolutionHeightCvarCallbacks g_draw_resolution_height_cvar_callbacks;
 
 // Guest frame interval (vblanks per game tick). The game writes 2 (30 FPS)
 // through sub_82218940; the 60 FPS patch forces 1. The pause/match-quit code
@@ -369,6 +433,8 @@ void UpdateGuestVblankRate() {
   double hz = g_frame_rate_vblank_hz.load(std::memory_order_relaxed);
   if (FrameRate30Strict()) {
     hz = 30.0;
+  } else if (REXCVAR_GET(online_frame_rate_cap) && rex::net::IsGameSessionOpen()) {
+    hz = 60.0;
   }
   if (rex::graphics::GetGuestVblankRate() != hz) {
     rex::graphics::SetGuestVblankRate(hz);
@@ -467,6 +533,18 @@ bool Is60FpsEnabled() {
 // file or the command line that the settings don't match yet is applied now.
 void BurstLimitGraphicsPresetReady() {
   g_graphics_preset_ready.store(true);
+  // Configs from before the Resolution by height: the whole scale they had.
+  if (DrawResolutionHeight() <= 0) {
+    int y = std::atoi(rex::cvar::GetFlagByName(
+                          rex::cvar::HasNonDefaultValue("resolution_scale") &&
+                                  !rex::cvar::HasNonDefaultValue("draw_resolution_scale_y")
+                              ? "resolution_scale"
+                              : "draw_resolution_scale_y")
+                          .c_str());
+    rex::cvar::SetFlagByName("draw_resolution_height", std::to_string(720 * std::clamp(y, 1, 7)));
+  }
+  // Also the X scale a config saved (an older build kept 8K's 6x at 1440p).
+  SyncDrawScaleToHeight();
   const GraphicsPreset* preset = FindGraphicsPreset(REXCVAR_GET(graphics_preset));
   if (preset && !GraphicsPresetMatches(*preset)) {
     ApplyGraphicsPreset(*preset);
@@ -490,6 +568,8 @@ void BurstLimitApplyPostEffectSettings() {
     rex::cvar::SetFlagByName("frame_rate", rate);
   }
   ApplyFrameRate();
+  // The GPU starts with the X / Y scales of the Resolution (not a stale saved X).
+  SyncDrawScaleToHeight();
 }
 
 // Mid-asm hooks, wired up in burstlimit_manifest.toml.
@@ -631,6 +711,27 @@ void BurstLimitOnlineInputDelay(PPCRegister& r11, PPCCRRegister& cr6) {
 // +8 frames, +12 seconds, capped at 999:59:59), jumping to its end
 // (0x8221933C): real seconds instead.
 void BurstLimitPlayTime(PPCRegister& r31) {
+  if (rex::perf::IsLatencyWindowOpen()) {
+    // Latency probe (latency_log): the frame player 1's action changes after
+    // a press. Player table 0x84239C10, fighter = *(player + 44), action at
+    // fighter + 0x750.
+    static uint32_t last_action = 0;
+    auto* runtime = rex::Runtime::instance();
+    auto* memory = runtime ? runtime->memory() : nullptr;
+    const uint32_t player =
+        memory ? rex::memory::load_and_swap<uint32_t>(memory->TranslateVirtual<uint8_t*>(0x84239C10))
+               : 0;
+    const uint32_t fighter =
+        player >= 0x40000000u
+            ? rex::memory::load_and_swap<uint32_t>(memory->TranslateVirtual<uint8_t*>(player + 44))
+            : 0;
+    if (fighter >= 0x40000000u) {
+      const uint32_t action =
+          rex::memory::load_and_swap<uint32_t>(memory->TranslateVirtual<uint8_t*>(fighter + 0x750));
+      rex::perf::LatencyLog(action != last_action ? "action" : "frame", action, last_action);
+      last_action = action;
+    }
+  }
   static std::chrono::steady_clock::time_point last{};
   static double pending = 0.0;
   const auto now = std::chrono::steady_clock::now();
@@ -728,8 +829,17 @@ void SleepMicroseconds(GpuWaitState& state, int64_t microseconds) {
 
 }  // namespace
 
+// burstlimit_native.cpp: with the native renderer the waiting thread runs the
+// GPU's commands itself and sleeps until a vblank or a kick.
+bool BurstLimitNativeGpuWait();
+
 REX_EXTERN(__imp__sub_820B10E8);
 extern "C" REX_FUNC(sub_820B10E8) {
+  if (BurstLimitNativeGpuWait()) {
+    // The original keeps its hang check and returns "keep waiting".
+    __imp__sub_820B10E8(ctx, base);
+    return;
+  }
   // r3: the wait's state (+0 the D3D device, +20 mftb when it started).
   const uint32_t wait = ctx.r3.u32;
   const uint32_t start = rex::memory::load_and_swap<uint32_t>(base + wait + 20);
@@ -746,6 +856,13 @@ extern "C" REX_FUNC(sub_820B10E8) {
   }
   state.last_us = NowUs();
   __imp__sub_820B10E8(ctx, base);
+}
+
+// frame_rate = unlocked and no game session open (burstlimit_native.cpp skips
+// the frame timer's Sleep(1) then, with the native renderer).
+bool BurstLimitFrameRateUnlockedOffline() {
+  return g_frame_rate_vblank_hz.load(std::memory_order_relaxed) >= 1000.0 &&
+         g_interval_one.load(std::memory_order_relaxed) && !rex::net::IsGameSessionOpen();
 }
 
 // The game's frame timer, once per frame: also follows a game session

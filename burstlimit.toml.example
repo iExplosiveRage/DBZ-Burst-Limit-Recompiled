@@ -16,6 +16,11 @@ draw_resolution_scale_y = 2
 # Weak PC / laptop: "low_end" (960x540) or "lowest" (640x360) sets resolution, upscalers, filters
 # and blur effects at once (Graphics preset in DISPLAY). "custom" = the separate settings.
 # graphics_preset = "low_end"
+# Renderer: true = Native (the default, faster), false = Emulated (the classic path; use it if
+# something looks wrong). Applies after a restart.
+# gpu_native_renderer = false
+# Resolution by height: 720, 1080, 1440, 2160 (4K), 2880 (5K), 3240 (6K), 4320 (8K).
+# draw_resolution_height = 1440
 # Render path: empty = the fast one (all GPUs). "rov" = Compatibility, only if the picture looks
 # broken (e.g. old Intel drivers); much slower. Applies after a restart.
 # render_target_path_d3d12 = "rov"
@@ -40,6 +45,8 @@ online_name = ""
 online_input_delay = "4"
 
 # Game patches (see README).
+# Offline fights: "reduced" = no input delay, "original" = the game's own 3 frames (50 ms).
+input_delay = "reduced"
 online_fast_tick = true
 # LAN / Radmin VPN input buffer (both players the same): 0 = LAN, 1 = internet, 2 = high ping, 3 = original.
 online_tick_sleep = 1

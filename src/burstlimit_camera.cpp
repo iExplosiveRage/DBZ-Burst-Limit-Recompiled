@@ -44,6 +44,11 @@ REXCVAR_DEFINE_BOOL(freeze_game, false, "Patches",
                     "free camera toggles it. Offline only.")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
+REXCVAR_DEFINE_INT32(freeze_game_at_tick, 0, "Debug",
+                     "Testing: turn freeze_game on when the fight has run this many game ticks "
+                     "after READY?, for frames that are the same in every process. 0 = off")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 REXCVAR_DEFINE_BOOL(show_hud, true, "Patches",
                     "Shows the fight's HUD (life and Ki gauges, portraits, prompts). Off hides "
                     "it during play like the free camera does; the pause menu still shows.")
@@ -530,6 +535,26 @@ void BurstLimitCameraFrame(PPCRegister& r30) {
   auto* memory = runtime ? runtime->memory() : nullptr;
   if (!memory) {
     return;
+  }
+  {
+    // freeze_game_at_tick: game ticks of this battle since READY?.
+    static uint32_t tick_battle = 0;
+    static int32_t ticks = 0;
+    const uint32_t battle = rex::memory::load_and_swap<uint32_t>(
+        memory->TranslateVirtual<const uint8_t*>(kBattlePointer));
+    if (battle != tick_battle) {
+      tick_battle = battle;
+      ticks = 0;
+    }
+    const int32_t freeze_at = REXCVAR_GET(freeze_game_at_tick);
+    // From READY? on (battle phase 1 at 0x841B5228): loading takes a
+    // different number of ticks every time.
+    const bool fighting = battle && rex::memory::load_and_swap<uint32_t>(
+                                        memory->TranslateVirtual<const uint8_t*>(0x841B5228)) >= 1;
+    if (fighting && freeze_at > 0 && ++ticks == freeze_at) {
+      rex::cvar::SetFlagByName("freeze_game", "true");
+      REXLOG_INFO("freeze_game_at_tick: frozen at tick {}", ticks);
+    }
   }
   ApplyFreeze(memory);
   UpdateFreeCamera(memory);

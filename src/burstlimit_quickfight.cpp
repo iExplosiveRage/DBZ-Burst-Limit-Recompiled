@@ -104,6 +104,8 @@ REX_EXTERN(sub_82232AD8);  // queue a game mode (6 = battle)
 REX_EXTERN(sub_8224EE58);  // stop the menu movie
 REX_EXTERN(sub_8224ED70);  // the menu movie is still playing
 REX_EXTERN(sub_82250C88);  // the menus' exit: stop their movies
+REX_EXTERN(sub_82288640);  // the menus' list window with id r3 (0 = the main menu's), or 0
+REX_EXTERN(sub_82289758);  // close and free a list window
 REX_EXTERN(sub_82120C90);
 REX_EXTERN(sub_8210A5F8);
 REX_EXTERN(__imp__sub_82232B28);  // boot logos screen
@@ -753,6 +755,12 @@ Outcome TryStart(PPCContext& ctx, uint8_t* base, uint32_t slot, Screen screen) {
   }
   if (screen != Screen::kMainMenu) {
     TitleSetup(ctx, base);
+  } else if (const uint32_t list = Call(ctx, base, sub_82288640, 0)) {
+    // The main menu's list window, closed like the menu does when a mode is
+    // picked (sub_82251108): the screen manager only tears the screen down,
+    // and the list would stay on screen over the fight, holding the input
+    // (START wouldn't open the pause menu).
+    Call(ctx, base, sub_82289758, list);
   }
   StartFight(ctx, base, *request, !boot);
   return Outcome::kStarted;
