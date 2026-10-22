@@ -191,6 +191,13 @@ void BurstLimitOnlineSetup() {
   BurstLimitNetInputSetup();
 }
 
+// At startup, once the user data folder (the online identity) is known: in
+// lobby mode the lobby connection starts in the background, so the online
+// menu finds it ready (issue #22). Nothing in the LAN / VPN mode.
+void BurstLimitOnlineConnectEarly() {
+  rex::net::online::ConnectLobbyEarly();
+}
+
 void BurstLimitOnlineGameNotice(const std::string& text, double seconds) {
   std::lock_guard<std::mutex> lock(g_game_notice_mutex);
   g_game_notice = text;

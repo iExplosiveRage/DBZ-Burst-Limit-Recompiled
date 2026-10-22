@@ -40,6 +40,7 @@ set(BURSTLIMIT_SOURCES
     src/burstlimit_quickfight.cpp
     src/burstlimit_ranked.cpp
     src/burstlimit_saves.cpp
+    src/burstlimit_signin.cpp
     src/burstlimit_slots.cpp
     src/burstlimit_stages.cpp
     src/burstlimit_widescreen.cpp

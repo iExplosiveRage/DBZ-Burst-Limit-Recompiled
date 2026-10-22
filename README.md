@@ -164,6 +164,10 @@ normal Windows program instead of inside an emulator.
 - **Online over the internet, no VPN** (`online_lobby_url`): rooms appear in the game's own Player Match menus
   (Create Match / Custom Match), served by a small lobby server; the two PCs then connect directly (ICE with
   STUN hole punching, a TURN relay when that isn't possible). See [Online play](#online-play).
+- **Sign in with any controller** (since 0.7.2): the online profile follows the controller you press Start
+  with, so a second controller or a virtual pad (Steam Input, DS4Windows) in the first slot no longer blocks
+  online with "You must sign in". The lobby connects as soon as the game starts, so the online menus find it
+  ready.
 - **Smooth online fights** (`online_input_delay`): every frame's input is sent right away over a side channel
   and both PCs run it a fixed number of frames later (2-8, the host's choice), instead of the game's 3-frame
   packs - no slow motion while the ping stays under the delay. The guest takes the host's online settings, every
@@ -462,6 +466,8 @@ settings menu (F1). Any setting can also be passed on the command line, e.g. `--
 | `online_lobby_url` | *(empty)* | Lobby server WebSocket URL (`wss://.../v1/ws`). The release `burstlimit.toml` sets it to the project's lobby. Empty = LAN / Radmin VPN only. |
 | `online_mode` | `auto` | `auto`: the lobby when `online_lobby_url` is set and `REX_XNET_IP` / `REX_XNET_SEARCH_IP` are not (so `Host_Online.bat` / `Join_Online.bat` keep the old way); `lobby` / `direct` force one. |
 | `online_name` | *(empty)* | Your name in the lobby and in the game (max 15 printable ASCII characters). Empty = the Windows user name. |
+| `online_lobby_connect_early` | `true` | Lobby mode: connect to the lobby in the background as soon as the game starts and stay connected (since 0.7.2). |
+| `online_connect_wait_ms` | `6000` | How long a search or Create Match waits for a lobby connection that is still being made. |
 | `online_frame_rate_cap` | `true` | Online sessions run at 60 FPS whatever `frame_rate` is (both players the same speed). |
 | `online_input_delay` | `4` | Lobby matches: input delay in frames (`2`-`8`), or `off` for the game's own timing (`online_tick_sleep`). The host's value is used by both players. |
 | `online_rules_host_health/attack/defense`, `online_rules_guest_health/attack/defense`, `online_rules_cutscenes` | `3` / `room` | Player Match rooms you host: the room rules you picked last (Health 1-8 bars, Attack and Defense 1-5, cut-scenes `room` / `on` / `off`), the menu's defaults for the next guest. |
@@ -504,6 +510,12 @@ The release `burstlimit.toml` already points `online_lobby_url` at the project's
   **Random** -> the host's room shows with their name; pick it.
 - Both press **Ready!** in the Session Lobby.
 - If Windows Firewall asks, allow `burstlimit.exe` (private and public networks).
+- Any controller can be used: online sign-in follows the controller you pressed Start with at the title
+  (since 0.7.2).
+
+The game connects to the lobby in the background as soon as it starts (`online_lobby_connect_early`), and
+a slow first connection is retried within a few seconds; a search made while it is still connecting waits
+for it (up to `online_connect_wait_ms`) instead of showing an empty list.
 
 The two PCs connect directly (ICE: STUN hole punching), so no port forwarding is needed; when a direct
 connection isn't possible they go through a TURN relay the lobby hands out per match. Your name in the lobby and

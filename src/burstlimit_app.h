@@ -26,6 +26,7 @@ void BurstLimitBrandingSetup(const std::filesystem::path& game_data_root);
 void BurstLimitButtonsSetup(const std::filesystem::path& game_data_root);
 // burstlimit_online.cpp
 void BurstLimitOnlineSetup();
+void BurstLimitOnlineConnectEarly();
 // burstlimit_online_rules.cpp: the Player Match room rules menu (host) / panel (guest).
 std::unique_ptr<rex::ui::ImGuiDialog> BurstLimitCreateOnlineRules(
     rex::ui::ImGuiDrawer* drawer, rex::ui::ImmediateDrawer* immediate_drawer,
@@ -100,6 +101,8 @@ class BurstlimitApp : public rex::ReXApp {
     BurstLimitSavesSetup(ExeDirectory(), user_data_root());
     // The online identity (Ranked Match) lives in the user data folder.
     BurstLimitRankedSetup(user_data_root());
+    // Lobby mode: start connecting to the online lobby in the background.
+    BurstLimitOnlineConnectEarly();
   }
 
   // The start form tags of the character select (burstlimit_forms.cpp), and
@@ -162,6 +165,7 @@ class BurstlimitApp : public rex::ReXApp {
       // The settings menu's save export / import works from the start screen.
       BurstLimitSavesSetup(ExeDirectory(), defaults.user_data_root);
       BurstLimitRankedSetup(defaults.user_data_root);
+      BurstLimitOnlineConnectEarly();
       start_screen_ = BurstLimitCreateStartScreen(
           imgui_drawer(), immediate_drawer(), defaults.game_data_root,
           [this, defaults, resume] {

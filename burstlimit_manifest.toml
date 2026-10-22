@@ -815,3 +815,11 @@ registers = ["r28", "r31"]
 address = 0x822983EC
 name = "BurstLimitRankedArbitration"
 registers = ["r30"]
+
+# --- Xbox LIVE sign-in follows player 1's controller (src/burstlimit_signin.cpp) ---
+# sub_82280260(slot r3, controller r4) sets the controller of a player slot (the title's
+# "press Start" pad becomes slot 0): the profile is signed in on slot 0's controller.
+[[entrypoint.midasm_hook]]
+address = 0x82280260
+name = "BurstLimitSigninPad"
+registers = ["r3", "r4"]
