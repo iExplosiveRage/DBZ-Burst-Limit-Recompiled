@@ -10,8 +10,10 @@
 #include <windows.h>
 
 #include <rex/cvar.h>
+#include <rex/logging.h>
 #include <rex/rex_app.h>
 #include <rex/ui/keybinds.h>
+#include <rex/ui/overlay/achievement_notification.h>
 #include <rex/ui/overlay/overlay_text.h>
 #include <rex/ui/overlay/quick_menu.h>
 
@@ -39,6 +41,9 @@ void BurstLimitSavesMenu(rex::ui::QuickMenuConfig& menu);
 // GAME tab "Unlock everything" (the unlocks of a 100% save, records kept).
 void BurstLimitUnlockMenu(rex::ui::QuickMenuSection& section);
 std::unique_ptr<rex::ui::ImGuiDialog> BurstLimitCreateOnlineNotice(rex::ui::ImGuiDrawer* drawer);
+// burstlimit_exit.cpp: "Exit Game" (main menu entry, GAME tab item).
+void BurstLimitSetExitHandler(std::function<void()> handler);
+void BurstLimitExitMenu(rex::ui::QuickMenuSection& section);
 // burstlimit_ranked.cpp: Ranked Match / leaderboard overlay, menu, identity folder.
 std::unique_ptr<rex::ui::ImGuiDialog> BurstLimitCreateRankedOverlay(rex::ui::ImGuiDrawer* drawer);
 void BurstLimitRankedMenu(rex::ui::QuickMenuConfig& menu);
@@ -74,6 +79,18 @@ std::unique_ptr<rex::ui::ImGuiDialog> BurstLimitCreateInstaller(
     rex::ui::ImGuiDrawer* drawer, const std::filesystem::path& target,
     std::function<void(std::filesystem::path)> done,
     std::function<void(std::function<void()>)> defer);
+
+// burstlimit_achievements.cpp: the achievement popup (game style + chime) and
+// its F1 > GAME settings / list.
+std::unique_ptr<rex::ui::AchievementNotificationDialog> BurstLimitCreateAchievementToast(
+    rex::ui::ImGuiDrawer* drawer, rex::ui::ImmediateDrawer* immediate_drawer);
+void BurstLimitAchievementsMenu(rex::ui::QuickMenuSection& section);
+// The F7 achievements window in the popup's style (it has the controllers
+// while open), and F7 / its debug command opening or closing it.
+std::unique_ptr<rex::ui::ImGuiDialog> BurstLimitCreateAchievementsWindow(
+    rex::ui::ImGuiDrawer* drawer, rex::ui::ImmediateDrawer* immediate_drawer,
+    std::function<void(std::function<void()>)> defer);
+void BurstLimitToggleAchievementsWindow();
 
 class BurstlimitApp : public rex::ReXApp {
  public:
@@ -120,6 +137,18 @@ class BurstlimitApp : public rex::ReXApp {
     mods_panel_ = BurstLimitCreateModsPanel(
         drawer, immediate_drawer(), game_data_root(),
         [this](std::function<void()> function) {
+          app_context().CallInUIThreadDeferred(std::move(function));
+        });
+    // "Exit Game" closes the window like its close button (UI thread).
+    BurstLimitSetExitHandler([this] {
+      app_context().CallInUIThreadDeferred([this] {
+        if (window()) {
+          window()->RequestClose();
+        }
+      });
+    });
+    achievements_window_ = BurstLimitCreateAchievementsWindow(
+        drawer, immediate_drawer(), [this](std::function<void()> function) {
           app_context().CallInUIThreadDeferred(std::move(function));
         });
     rex::ui::RegisterBind("bind_free_camera", "Insert", "Free camera on/off", [] {
@@ -192,7 +221,26 @@ class BurstlimitApp : public rex::ReXApp {
     return std::nullopt;
   }
 
+  // F7 (bind_achievements): the game-styled achievements window instead of
+  // the SDK's list. The window is ours (achievements_window_, made with the
+  // dialogs), so this only opens or closes it and leaves the SDK nothing to
+  // keep - every F7 comes back here.
+  std::unique_ptr<rex::ui::ImGuiDialog> CreateAchievementsOverlay() override {
+    BurstLimitToggleAchievementsWindow();
+    return nullptr;
+  }
+
+  // Achievement unlocks: the game-styled popup instead of the SDK's.
+  std::unique_ptr<rex::ui::AchievementNotificationDialog> CreateAchievementNotificationDialog()
+      override {
+    if (!imgui_drawer() || !immediate_drawer()) {
+      return nullptr;
+    }
+    return BurstLimitCreateAchievementToast(imgui_drawer(), immediate_drawer());
+  }
+
   void OnShutdown() override {
+    BurstLimitSetExitHandler(nullptr);
     rex::ui::UnregisterBind("bind_free_camera");
     rex::ui::UnregisterBind("bind_freeze_game");
     start_form_tags_.reset();
@@ -200,6 +248,7 @@ class BurstlimitApp : public rex::ReXApp {
     online_rules_.reset();
     ranked_overlay_.reset();
     mods_panel_.reset();
+    achievements_window_.reset();
     installer_.reset();
     start_screen_.reset();
   }
@@ -616,16 +665,24 @@ class BurstlimitApp : public rex::ReXApp {
         "Online, the host's setting is used."));
     ki_speed.shown_if_cvar = "ki_charge";
     ki_speed.shown_if_values = {"true"};
+    game.items.push_back(toggle(
+        "Drama sequences", "drama_pieces",
+        "Drama Pieces: the short cut-scenes that interrupt a fight (a partner stepping in, story "
+        "moments in Z Chronicles). Off = none, in every mode; the opening / ending scenes stay "
+        "(the game's own cut-scenes rule decides those). From the next fight. Online, the "
+        "host's setting is used by both players."));
     game.items.push_back(toggle("Vibration", "vibration", "Controller vibration."));
     game.items.push_back(choice(
         "Button icons", "button_icons",
         {{"auto", "Auto"},
          {"xbox", "Xbox"},
          {"playstation", "PlayStation"},
-         {"switch", "Nintendo Switch"}},
-        "Which controller's buttons the game shows in its prompts, tutorials and fight HUD (and "
-        "this menu). Auto follows the controller in use (Xbox for the keyboard or an unknown "
-        "pad). Applies right away."));
+         {"switch", "Nintendo Switch"},
+         {"keyboard", "Keyboard"}},
+        "Which buttons the game shows in its prompts, command lists, tutorials and fight HUD "
+        "(and this menu). Auto follows what you play with: the controller in use (Xbox for an "
+        "unknown pad), or the keys bound to the buttons once you play on the keyboard. Applies "
+        "right away."));
     game.items.push_back(choice(
         "Menu buttons", "quick_menu_buttons",
         {{"back+start", "Back + Start"}, {"l3+r3", "L3 + R3"}, {"none", "Keyboard only"}},
@@ -658,8 +715,70 @@ class BurstlimitApp : public rex::ReXApp {
                              "Enter, then the key to use."));
     // Unlock everything (burstlimit_saves.cpp), with a confirm step.
     BurstLimitUnlockMenu(game);
+    BurstLimitAchievementsMenu(game);
+    // Exit game (burstlimit_exit.cpp), with a confirm step.
+    BurstLimitExitMenu(game);
     menu.quick_toggle_label = "Free camera";
     menu.quick_toggle_cvar = "free_camera";
+
+    // Keyboard play (the SDK's keyboard/mouse device, on by default): the
+    // keys of each controller button, rebindable here.
+    rex::ui::QuickMenuSection& controls = menu.sections.emplace_back();
+    controls.title = "KEYBOARD";
+    controls.items.push_back(toggle(
+        "Keyboard play", "mnk_mode",
+        "Play with the keyboard, with or without a controller (both work together). Arrows / "
+        "WASD move, Enter confirms (and pauses a fight), Esc goes back."));
+    controls.items.push_back(choice(
+        "Keyboard player", "keyboard_player", {{"1", "Player 1"}, {"2", "Player 2"}},
+        "Player 1: the keyboard and the first controller are both player 1. Player 2: the "
+        "keyboard is player 2 next to a controller (local Versus: press Start / Enter on the "
+        "Versus screen with each)."));
+    const char* const kPressKey = " Press A or Enter, then the key to use.";
+    struct KeyRow {
+      const char* label;
+      const char* cvar;
+      const char* help;
+    };
+    const KeyRow kKeys[] = {
+        {"Guard (A)", "keybind_a", "Guard, and A in the menus."},
+        {"Ki Blast (B)", "keybind_b", "Ki Blast, and B in the menus."},
+        {"Rush Attack (X)", "keybind_x", "Rush Attack (X)."},
+        {"Smash Attack (Y)", "keybind_y", "Smash Attack (Y)."},
+        {"Aura Spark (LB)", "keybind_left_shoulder", "Aura Spark (LB)."},
+        {"Transform (RB)", "keybind_right_shoulder", "Transform (RB)."},
+        {"Blow-Away Attack (LT)", "keybind_left_trigger", "Blow-Away Attack (LT)."},
+        {"Pursuit (RT)", "keybind_right_trigger",
+         "Pursuit (RT) - also held for the RT moves of the command list."},
+        {"Up", "keybind_lstick_up", "Move up (left stick). The arrow keys also move."},
+        {"Down", "keybind_lstick_down", "Move down (left stick). The arrow keys also move."},
+        {"Left", "keybind_lstick_left", "Move left (left stick). The arrow keys also move."},
+        {"Right", "keybind_lstick_right", "Move right (left stick). The arrow keys also move."},
+        {"Ki charge (L3)", "keybind_lstick_press", "L3: the Ki charge when it's on (GAME)."},
+        {"Start / Pause", "keybind_start", "Start: pauses a fight."},
+        {"Back", "keybind_back", "The Back button."},
+        {"Menu confirm", "keybind_menu_confirm",
+         "Confirms in the menus (A; Start at the title), pauses a fight."},
+        {"Menu back", "keybind_menu_back", "Goes back in the menus (B), pauses a fight."},
+    };
+    for (const KeyRow& row : kKeys) {
+      controls.items.push_back(key(row.label, row.cvar, std::string(row.help) + kPressKey));
+    }
+    Item& reset_keys = controls.items.emplace_back();
+    reset_keys.kind = Item::Kind::kAction;
+    reset_keys.label = "Default keys";
+    reset_keys.action_label = "Reset";
+    reset_keys.help = "Puts every key of keyboard play back to the default.";
+    reset_keys.action = [](const std::string&) {
+      for (const std::string& flag :
+           rex::cvar::ListFlagsByCategory("Input/Keybinds/Controller")) {
+        if (const rex::cvar::FlagEntry* info = rex::cvar::GetFlagInfo(flag)) {
+          rex::cvar::SetFlagByName(flag, info->default_value);
+        }
+      }
+      rex::ReXApp::SaveConfigCommand();
+      REXLOG_INFO("Settings menu: keyboard keys reset to the defaults");
+    };
 
     rex::ui::QuickMenuSection& online_section = menu.sections.emplace_back();
     online_section.title = "ONLINE";
@@ -734,6 +853,7 @@ class BurstlimitApp : public rex::ReXApp {
   std::unique_ptr<rex::ui::ImGuiDialog> online_rules_;
   std::unique_ptr<rex::ui::ImGuiDialog> ranked_overlay_;
   std::unique_ptr<rex::ui::ImGuiDialog> mods_panel_;
+  std::unique_ptr<rex::ui::ImGuiDialog> achievements_window_;
   std::unique_ptr<rex::ui::ImGuiDialog> installer_;
   std::unique_ptr<rex::ui::ImGuiDialog> start_screen_;
   bool early_setup_done_ = false;

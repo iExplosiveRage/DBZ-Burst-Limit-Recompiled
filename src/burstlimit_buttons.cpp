@@ -25,6 +25,12 @@
 // The icons are Xelu's Free Controller Prompts (public domain, CC0), built
 // into the exe (burstlimit_button_icons.inc, scripts/make_button_icons.py).
 //
+// Played on the keyboard (button_icons keyboard, or auto after a key), every
+// button shows the key bound to it (keybind_* settings, the same pack's light
+// keys: burstlimit_key_icons.inc, scripts/make_key_icons.py): in menus A and
+// B are the menu keys (Enter, Esc), in a fight the fight keys (Space, K...).
+// A changed key redraws the icons at once.
+//
 // Changing the setting: a texture made from now on gets the new icons at the
 // NTXR loader; one the game already made (UICMN_WINDOW stays loaded for good)
 // is redrawn in place in guest memory - the GPU side notices the write - as
@@ -49,6 +55,7 @@
 #include <rex/cvar.h>
 #include <rex/graphics/draw_overrides.h>
 #include <rex/input/input_system.h>
+#include <rex/input/mnk/mnk_input_driver.h>
 #include <rex/logging.h>
 #include <rex/memory.h>
 #include <rex/memory/utils.h>
@@ -60,17 +67,32 @@
 #include "burstlimit_cpk.h"
 
 REXCVAR_DEFINE_STRING(button_icons, "auto", "Patches",
-                      "Button icons in the game's prompts: auto (the controller in use), xbox, "
-                      "playstation or switch")
-    .allowed({"auto", "xbox", "playstation", "switch"})
+                      "Button icons in the game's prompts: auto (the controller or keyboard in "
+                      "use), xbox, playstation, switch or keyboard (the keys bound to the buttons)")
+    .allowed({"auto", "xbox", "playstation", "switch", "keyboard"})
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
 namespace {
 
 #include "burstlimit_button_icons.inc"
+#include "burstlimit_key_icons.inc"
 
-enum Style : int { kXbox = 0, kPlayStation = 1, kSwitch = 2, kStyleCount = 3 };
-constexpr const char* kStyleNames[kStyleCount] = {"xbox", "playstation", "switch"};
+// kKeyboard: the keys of the menus (A = Enter, B = Esc); kKeyboardFight: the
+// keys of a fight (all buttons as bound).
+enum Style : int {
+  kXbox = 0,
+  kPlayStation = 1,
+  kSwitch = 2,
+  kKeyboard = 3,
+  kKeyboardFight = 4,
+  kStyleCount = 5
+};
+constexpr const char* kStyleNames[kStyleCount] = {"xbox", "playstation", "switch", "keyboard",
+                                                  "keyboard_fight"};
+
+bool IsKeyboardStyle(int style) {
+  return style == kKeyboard || style == kKeyboardFight;
+}
 
 // The Xbox buttons, by physical position.
 enum class Button { kA, kB, kX, kY, kLB, kRB, kLT, kRT, kCount };
@@ -80,8 +102,71 @@ struct Png {
   size_t size;
 };
 
+// The keybind setting of a button.
+const char* KeybindCvar(Button button) {
+  switch (button) {
+    case Button::kA: return "keybind_a";
+    case Button::kB: return "keybind_b";
+    case Button::kX: return "keybind_x";
+    case Button::kY: return "keybind_y";
+    case Button::kLB: return "keybind_left_shoulder";
+    case Button::kRB: return "keybind_right_shoulder";
+    case Button::kLT: return "keybind_left_trigger";
+    case Button::kRT: return "keybind_right_trigger";
+    default: return "";
+  }
+}
+
+// The key shown for a button in a keyboard style: the first key of its
+// setting ("Space,L" -> Space; "Shift+X" -> X), or in menus the menu keys for
+// A and B.
+std::string KeyFor(int style, Button button) {
+  std::string cvar = KeybindCvar(button);
+  if (style == kKeyboard && button == Button::kA) {
+    cvar = "keybind_menu_confirm";
+  } else if (style == kKeyboard && button == Button::kB) {
+    cvar = "keybind_menu_back";
+  }
+  if (cvar.empty() || !rex::cvar::GetFlagInfo(cvar)) {
+    return {};
+  }
+  std::string value = rex::cvar::GetFlagByName(cvar);
+  value = value.substr(0, value.find(','));
+  const size_t plus = value.rfind('+');
+  if (plus != std::string::npos && plus + 1 < value.size()) {
+    value = value.substr(plus + 1);
+  }
+  while (!value.empty() && value.front() == ' ') value.erase(value.begin());
+  while (!value.empty() && value.back() == ' ') value.pop_back();
+  return value;
+}
+
+// What the keyboard styles show, all 8 buttons (changes when a key is bound).
+std::string KeyboardSignature() {
+  std::string signature;
+  for (int style : {kKeyboard, kKeyboardFight}) {
+    for (int b = 0; b < int(Button::kCount); ++b) {
+      signature += KeyFor(style, Button(b)) + ";";
+    }
+  }
+  return signature;
+}
+
+Png KeyPng(const std::string& key) {
+  for (const KeyIconFile& file : kKeyIconFiles) {
+    if (key == file.key) {
+      return {file.data, file.size};
+    }
+  }
+  // A key without an icon of its own (none bound: nothing).
+  return key.empty() ? Png{nullptr, 0} : Png{kKeyIconBlank, sizeof(kKeyIconBlank)};
+}
+
 // The icon drawn for a button (none: the button is only cleared).
 Png IconPng(int style, Button button) {
+  if (IsKeyboardStyle(style)) {
+    return KeyPng(KeyFor(style, button));
+  }
   if (style == kXbox) {
     switch (button) {
       case Button::kA: return {kXboxAPng, sizeof(kXboxAPng)};
@@ -312,6 +397,10 @@ constexpr int kPictureScale = 4;
 // The style's controller picture, at the
 // game's size (scale 1) or kPictureScale.
 const Image* GetPicture(int style, int scale) {
+  // The keyboard: the Xbox pad, its buttons labelled with their keys (Restyle).
+  if (IsKeyboardStyle(style)) {
+    style = kXbox;
+  }
   static std::array<Image, kStyleCount> pictures;
   static std::array<Image, kStyleCount> small_pictures;
   static std::array<bool, kStyleCount> tried = {};
@@ -641,6 +730,26 @@ void Restyle(Image& image, const Slot& slot, int style, std::vector<bool>* dirty
           break;
         }
         image.pixels = picture->pixels;
+        if (IsKeyboardStyle(style)) {
+          // The keys over the pad's buttons (where the game's highlights go).
+          struct Spot {
+            Button button;
+            float x, y, w, h;
+          };
+          constexpr Spot kSpots[] = {
+              {Button::kA, 379.0f, 203.0f, 34, 30},   {Button::kB, 416.5f, 168.5f, 34, 30},
+              {Button::kX, 341.0f, 168.5f, 34, 30},   {Button::kY, 379.0f, 133.5f, 34, 30},
+              {Button::kLB, 83.0f, 72.0f, 40, 30},    {Button::kRB, 380.0f, 75.0f, 40, 30},
+              {Button::kLT, 108.0f, 32.0f, 40, 30},   {Button::kRT, 355.0f, 32.0f, 40, 30}};
+          for (const Spot& spot : kSpots) {
+            if (const Icon* key = GetIcon(style, spot.button)) {
+              DrawIcon(image, *key,
+                       {(spot.x - spot.w * 0.5f) * k, (spot.y - spot.h * 0.5f) * k, spot.w * k,
+                        spot.h * k},
+                       true);
+            }
+          }
+        }
         touch(r);
         break;
       }
@@ -887,8 +996,13 @@ int StyleFromGamepadType(uint8_t type) {
   }
 }
 
+// Game thread: whether a battle is on (also paused: its command list shows
+// the fight's keys) - the keyboard icons are the fight's keys then.
+std::atomic<bool> g_in_battle{false};
+
 int ResolveStyle(bool poll_controller) {
   const std::string value = REXCVAR_GET(button_icons);
+  const int keyboard = g_in_battle.load() ? kKeyboardFight : kKeyboard;
   if (value == "xbox") {
     return kXbox;
   }
@@ -898,25 +1012,36 @@ int ResolveStyle(bool poll_controller) {
   if (value == "switch") {
     return kSwitch;
   }
+  if (value == "keyboard") {
+    return keyboard;
+  }
   if (poll_controller) {
     auto* runtime = rex::Runtime::instance();
     auto* input =
         runtime ? static_cast<rex::input::InputSystem*>(runtime->input_system()) : nullptr;
     if (input) {
-      const int style = StyleFromGamepadType(input->GetGamepadType(input->GetLastUsedUser()));
+      const bool keys = input->LastInputWasKeyboard();
+      int style =
+          keys ? kKeyboard : StyleFromGamepadType(input->GetGamepadType(input->GetLastUsedUser()));
+      // A pad of unknown type after the keyboard: Xbox (as for unknown pads).
+      if (style < 0 && !keys && IsKeyboardStyle(g_auto_style.load())) {
+        style = kXbox;
+      }
       if (style >= 0 && style != g_auto_style.load()) {
         g_auto_style.store(style);
-        REXLOG_INFO("Button icons: auto - {} controller", kStyleNames[style]);
+        REXLOG_INFO("Button icons: auto - {}", kStyleNames[style]);
       }
     }
   }
-  return g_auto_style.load();
+  const int style = g_auto_style.load();
+  return IsKeyboardStyle(style) ? keyboard : style;
 }
 
 rex::ui::ButtonGlyphs Glyphs(int style) {
-  return style == kPlayStation ? rex::ui::ButtonGlyphs::kPlayStation
-         : style == kSwitch    ? rex::ui::ButtonGlyphs::kNintendo
-                               : rex::ui::ButtonGlyphs::kXbox;
+  return style == kPlayStation    ? rex::ui::ButtonGlyphs::kPlayStation
+         : style == kSwitch       ? rex::ui::ButtonGlyphs::kNintendo
+         : IsKeyboardStyle(style) ? rex::ui::ButtonGlyphs::kKeyboard
+                                  : rex::ui::ButtonGlyphs::kXbox;
 }
 
 // Whether `memory` at a live texture still holds `data`'s blocks, tiled.
@@ -965,9 +1090,57 @@ bool Committed(rex::memory::Memory* memory, uint32_t address, const Slot& slot) 
   return true;
 }
 
+// The keys bound to the buttons changed: the keyboard styles' icons and
+// textures are made again, and the loaded textures showing them get the new
+// keys (game thread).
+void KeysChanged(rex::memory::Memory* memory) {
+  std::lock_guard<std::mutex> lock(g_mutex);
+  std::vector<std::array<std::vector<uint8_t>, kStyleCount>> shown(g_states.size());
+  for (size_t i = 0; i < g_states.size(); ++i) {
+    for (int style : {int(kKeyboard), int(kKeyboardFight)}) {
+      shown[i][style] = std::move(g_states[i].made[style]);
+      g_states[i].made[style].clear();
+      g_states[i].made_hash[style] = 0;
+    }
+  }
+  {
+    std::lock_guard<std::mutex> icons_lock(g_icons_mutex);
+    for (int style : {int(kKeyboard), int(kKeyboardFight)}) {
+      g_icons[style] = {};
+      g_icons_tried[style] = {};
+    }
+  }
+  size_t redrawn = 0;
+  for (auto it = g_live.begin(); it != g_live.end();) {
+    if (!IsKeyboardStyle(it->style)) {
+      ++it;
+      continue;
+    }
+    const Slot& slot = Slots()[it->slot];
+    const std::vector<uint8_t>& old_data = shown[it->slot][it->style];
+    const std::vector<uint8_t>& wanted = DataFor(it->slot, it->style);
+    uint8_t* host = memory ? memory->TranslateVirtual<uint8_t*>(it->address) : nullptr;
+    if (!host || old_data.empty() || wanted.empty() || !Committed(memory, it->address, slot) ||
+        !HoldsTiled(host, slot, old_data)) {
+      it = g_live.erase(it);
+      continue;
+    }
+    WriteTiled(host, slot, wanted);
+    ++redrawn;
+    ++it;
+  }
+  REXLOG_INFO("Button icons: keys changed - {} loaded textures redrawn", redrawn);
+}
+
 }  // namespace
 
-// The style in effect: 0 Xbox, 1 PlayStation, 2 Switch. Any thread.
+// The settings menu's hint glyphs for a style (BurstLimitButtonStyleNow...).
+rex::ui::ButtonGlyphs BurstLimitGlyphsForStyle(int style) {
+  return Glyphs(style);
+}
+
+// The style in effect: 0 Xbox, 1 PlayStation, 2 Switch, 3 / 4 the keyboard
+// (menus / fight). Any thread.
 int BurstLimitButtonStyle() {
   return g_style.load();
 }
@@ -1011,6 +1184,42 @@ void BurstLimitButtonsSetup(const std::filesystem::path& game_data_root) {
 // Every game tick (from BurstLimitCameraFrame, game thread): follows the
 // setting and the controller in use, and redraws the textures already made.
 void BurstLimitButtonsFrame(rex::memory::Memory* memory) {
+  // Fighting = the battle object is there, FIGHT! (phase 2) and not paused
+  // (its flags +260 bit 0): Enter = Start (pause), Esc = Start. Anywhere else
+  // (menus, the pause menu, a fight's intro / result) Enter = A (+ Start for
+  // the title's "Press Start"; A + Start in the pause menu would resume the
+  // fight, so only A in a battle) and Esc = B.
+  if (memory) {
+    const uint32_t battle =
+        rex::memory::load_and_swap<uint32_t>(memory->TranslateVirtual<uint8_t*>(0x841B5130));
+    const bool in_battle = battle != 0;
+    bool fighting = false;
+    if (in_battle) {
+      const uint32_t phase =
+          rex::memory::load_and_swap<uint32_t>(memory->TranslateVirtual<uint8_t*>(0x841B5228));
+      const uint32_t flags =
+          rex::memory::load_and_swap<uint32_t>(memory->TranslateVirtual<uint8_t*>(0x841B5244));
+      fighting = phase == 2 && !(flags & 1);
+    }
+    g_in_battle.store(in_battle);
+    constexpr uint16_t kPadA = 0x1000, kPadB = 0x2000, kPadStart = 0x0010;
+    rex::input::mnk::SetMenuKeyButtons(
+        fighting ? uint16_t(0) : in_battle ? kPadA : uint16_t(kPadA | kPadStart),
+        fighting ? kPadStart : kPadB);
+  }
+  // A key bound anew: the keyboard icons are drawn again (and the textures
+  // showing them get the new ones).
+  static std::string keyboard_signature;
+  if (g_frame % 15 == 0) {
+    std::string signature = KeyboardSignature();
+    if (signature != keyboard_signature) {
+      const bool first = keyboard_signature.empty();
+      keyboard_signature = std::move(signature);
+      if (!first) {
+        KeysChanged(memory);
+      }
+    }
+  }
   // The controller is looked at a few times a second.
   const int style = ResolveStyle(g_frame++ % 15 == 0);
   if (style != g_style.load()) {

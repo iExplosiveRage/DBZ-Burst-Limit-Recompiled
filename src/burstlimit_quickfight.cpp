@@ -23,6 +23,11 @@
 //          fighters is the stage, use "cellgames" to be explicit
 //   nointro (anywhere) Versus without the fighters' intros (the rules'
 //          cut-scenes setting off)
+// Z Chronicles: --quick_fight=zc (or zc,1 / story,ep1) starts the first
+// episode (Goku vs Raditz) the way the main menu's "Z Chronicles" does, then
+// confirms the Z Chronicles screens and skips the scenes before the fight by
+// itself (pad presses on player 1) until FIGHT!. A fresh save has only
+// episode 1, so only that one is supported.
 // Defaults: training, goku vs krillin, plains. The rest is what confirming
 // every window with A gives (first ultimate, first Drama Piece partner), and
 // no Drama Pieces. Offline only (it waits while a game session is open).
@@ -56,6 +61,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <thread>
 #include <cctype>
 #include <cstdint>
 #include <mutex>
@@ -65,7 +72,9 @@
 #include <vector>
 
 #include <rex/cvar.h>
+#include <rex/input/input_system.h>
 #include <rex/logging.h>
+#include <rex/runtime.h>
 #include <rex/memory/utils.h>
 #include <rex/net/session.h>
 #include <rex/ppc/context.h>
@@ -74,7 +83,8 @@
 REXCVAR_DEFINE_STRING(quick_fight, "", "Debug",
                       "Testing: skip the menus and start a fight at boot, e.g. "
                       "training,goku:ssj,krillin,plains (mode training|versus|versus2p|cpu, "
-                      "<p1>[:form[:color]], <p2>[:form[:color]], stage). The command "
+                      "<p1>[:form[:color]], <p2>[:form[:color]], stage), or zc (Z Chronicles episode 1, "
+                      "Goku vs Raditz). The command "
                       "quick_fight_now <same> starts one from the title or main menu");
 
 // burstlimit_forms.cpp
@@ -133,7 +143,7 @@ constexpr uint32_t kMenuReturnByte = 0x8424D6AC;  // 1: the select screens keep 
 constexpr uint32_t kMenuByteAE = 0x8424D6AE;
 constexpr uint32_t kMainMenuCursor = 0x8424D684;  // 0 Z Chronicles, 1 Versus, ... 4 Training
 
-enum class Mode { kTraining, kVersus, kVersus2P, kCpu };
+enum class Mode { kTraining, kVersus, kVersus2P, kCpu, kStory };
 
 struct Fighter {
   uint32_t character = 0;
@@ -147,6 +157,11 @@ struct Request {
   Fighter p2{4, 0, 0};
   uint32_t stage = 8;
   bool cutscenes = true;  // Versus: the fighters' intros (and other battle cut-scenes)
+  uint32_t episode = 0;   // Z Chronicles
+  // Z Chronicles with a save: the title and its storage prompt first (answered
+  // by StoryDriver), the jump from the main menu - the game only awards the
+  // episode's own achievement ("The Story Begins") with a storage device.
+  bool story_save = false;
   std::string text;
 };
 
@@ -332,6 +347,8 @@ const char* ModeName(Mode mode) {
       return "Versus (2 players)";
     case Mode::kCpu:
       return "Versus (CPU vs CPU)";
+    case Mode::kStory:
+      return "Z Chronicles";
   }
   return "?";
 }
@@ -399,6 +416,29 @@ bool ParseRequest(std::string_view text, Request& request, std::string& error) {
   size_t next = 0;
   if (next < tokens.size()) {
     const std::string mode = Normalize(tokens[next]);
+    if (mode == "zc" || mode == "story" || mode == "zchronicles" || mode == "chronicles") {
+      request.mode = Mode::kStory;
+      request.episode = 1;
+      for (size_t t = 1; t < tokens.size(); ++t) {
+        std::string word = Normalize(tokens[t]);
+        if (word == "save" || word == "storage") {
+          request.story_save = true;
+          continue;
+        }
+        if (word.rfind("episode", 0) == 0) {
+          word = word.substr(7);
+        } else if (word.rfind("ep", 0) == 0) {
+          word = word.substr(2);
+        }
+        uint32_t number;
+        if (!ParseNumber(word, number) || number != 1) {
+          error = "Z Chronicles: only episode 1 (Goku vs Raditz) can be started, or 'save' ('" +
+                  std::string(tokens[t]) + "')";
+          return false;
+        }
+      }
+      return true;
+    }
     bool is_mode = true;
     if (mode == "training" || mode == "train") {
       request.mode = Mode::kTraining;
@@ -653,6 +693,109 @@ void StartFight(PPCContext& ctx, uint8_t* base, const Request& request, bool fro
   rex::FlushLogging();
 }
 
+// Z Chronicles from the boot / title / main menu: what the main menu does
+// when "Z Chronicles" is picked (sub_82251868 at 0x82251F28): the select
+// screens' context 13, the Z Chronicles object's byte +62 (at 0x84248B90)
+// cleared, game mode 11 queued. The Z Chronicles screens then run as usual;
+// StoryDriver confirms them.
+constexpr uint32_t kStoryObject = 0x84248B88;  // the Z Chronicles object (state +188)
+constexpr uint32_t kBattlePointer = 0x841B5130;
+constexpr uint32_t kBattlePhase = 0x841B5228;  // 0 loading, 1 READY?, 2 FIGHT!
+
+std::atomic<bool> g_story_driver{false};
+std::atomic<bool> g_story_queued{false};
+
+void StoryDriver() {
+  using namespace std::chrono;
+  auto* runtime = rex::Runtime::instance();
+  auto* memory = runtime ? runtime->memory() : nullptr;
+  if (!memory) {
+    return;
+  }
+  uint8_t* base = memory->TranslateVirtual<uint8_t*>(0);
+  auto press = [](uint16_t buttons, uint32_t ms) {
+    auto* rt = rex::Runtime::instance();
+    if (auto* input = rt ? static_cast<rex::input::InputSystem*>(rt->input_system()) : nullptr) {
+      input->InjectButtons(0, buttons, ms, 0, 0);
+    }
+  };
+  const auto start = steady_clock::now();
+  int64_t last_state = -2;
+  uint32_t last_battle = 1;
+  int presses = 0;
+  while (g_story_driver.load()) {
+    std::this_thread::sleep_for(milliseconds(100));
+    const auto elapsed = duration_cast<milliseconds>(steady_clock::now() - start).count();
+    if (elapsed > 180000) {
+      REXLOG_WARN("Quick fight: Z Chronicles: no FIGHT! after 180 s, stopping the presses");
+      break;
+    }
+    if (!g_story_queued.load()) {
+      // Boot, title and its storage prompt / notices: Start at the title, A
+      // (YES, OK) for the windows, until the main menu takes the jump.
+      bool main_menu = false;
+      for (uint32_t i = 0; i < kScreenSlotCount; ++i) {
+        const uint32_t slot = kScreenSlots + i * kScreenSlotStride;
+        main_menu |= R32(base, slot) != 0 && R32(base, slot + 8) == 4;
+      }
+      // (Not on the main menu: A there would pick a mode itself.)
+      if (!main_menu && (elapsed / 100) % 8 == 0) {
+        ++presses;
+        press(presses % 2 ? 0x0010 : 0x1000, 70);
+      }
+      continue;
+    }
+    const uint32_t story = R32(base, kStoryObject);
+    const int64_t state = story ? int64_t(R32(base, story + 188)) : -1;
+    const uint32_t battle = R32(base, kBattlePointer);
+    const uint32_t phase = battle ? R32(base, kBattlePhase) : 0;
+    if (state != last_state || (battle != 0) != (last_battle != 0)) {
+      REXLOG_INFO("Quick fight: Z Chronicles: {:.1f} s, story state {}, battle {:08X} phase {}",
+                  elapsed / 1000.0, state, battle, phase);
+      last_state = state;
+      last_battle = battle;
+    }
+    if (battle && phase == 2) {
+      REXLOG_INFO("Quick fight: Z Chronicles episode 1: FIGHT! after {:.1f} s ({} presses)",
+                  elapsed / 1000.0, presses);
+      rex::FlushLogging();
+      break;
+    }
+    // Every 0.8 s: A confirms the Z Chronicles screens and the dialogue;
+    // every third one is Start instead, which skips a scene (the opening
+    // scene in the fight, phase 0/1, only takes Start).
+    if ((elapsed / 100) % 8 != 0) {
+      continue;
+    }
+    ++presses;
+    const bool start_press = battle != 0 || presses % 3 == 0;
+    press(start_press ? 0x0010 : 0x1000, 70);
+  }
+  g_story_driver.store(false);
+}
+
+void StartStory(PPCContext& ctx, uint8_t* base, bool from_menu) {
+  Call(ctx, base, sub_82280438);
+  Call(ctx, base, sub_82280490);
+  Call(ctx, base, sub_82232718, 13);
+  W8(base, 0x84248B90 + 62, 0);
+  W32(base, kMainMenuCursor, 0);
+  Call(ctx, base, sub_82232AD8, 11);
+  if (from_menu) {
+    Call(ctx, base, sub_8224EE58);
+    Call(ctx, base, sub_82120C90);
+    Call(ctx, base, sub_8210A5F8);
+  }
+  W32(base, kMenuFlagsWord, 0);
+  g_story_queued.store(true);
+  REXLOG_INFO("Quick fight: Z Chronicles episode 1 (Goku vs Raditz): Z Chronicles queued, "
+              "confirming its screens");
+  rex::FlushLogging();
+  if (!g_story_driver.exchange(true)) {
+    std::thread(StoryDriver).detach();
+  }
+}
+
 // Whether `slot` is the only screen up (no window / popup over it).
 bool OnlyScreen(uint8_t* base, uint32_t slot) {
   for (uint32_t i = 0; i < kScreenSlotCount; ++i) {
@@ -722,8 +865,15 @@ Outcome TryStart(PPCContext& ctx, uint8_t* base, uint32_t slot, Screen screen) {
     request = g_pending;
     from_pending = true;
   }
+  const bool story_waits_for_menu =
+      request->mode == Mode::kStory && request->story_save && screen != Screen::kMainMenu;
+  if (story_waits_for_menu && !g_story_driver.exchange(true)) {
+    REXLOG_INFO("Quick fight: Z Chronicles with a save: through the title and the storage "
+                "prompt first");
+    std::thread(StoryDriver).detach();
+  }
   if (rex::net::IsGameSessionOpen() || !OnlyScreen(base, slot) ||
-      !ScreenSettled(base, slot, screen)) {
+      !ScreenSettled(base, slot, screen) || story_waits_for_menu) {
     // Online, a window over this screen or the screen still coming up: later
     // (a boot request becomes a pending one).
     if (!from_pending) {
@@ -762,7 +912,11 @@ Outcome TryStart(PPCContext& ctx, uint8_t* base, uint32_t slot, Screen screen) {
     // (START wouldn't open the pause menu).
     Call(ctx, base, sub_82289758, list);
   }
-  StartFight(ctx, base, *request, !boot);
+  if (request->mode == Mode::kStory) {
+    StartStory(ctx, base, !boot);
+  } else {
+    StartFight(ctx, base, *request, !boot);
+  }
   return Outcome::kStarted;
 }
 

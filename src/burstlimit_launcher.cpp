@@ -43,6 +43,7 @@
 #include <rex/ui/imgui_dialog.h>
 #include <rex/ui/overlay/overlay_text.h>
 #include <rex/ui/overlay/quick_menu.h>
+#include <rex/ui/ui_watchdog.h>
 
 #include "burstlimit_menuart.h"
 
@@ -61,6 +62,7 @@ REXCVAR_DEFINE_STRING(
 void BurstLimitPlayMenuSound(int sound);
 // burstlimit_buttons.cpp: the button_icons style now (0 Xbox, 1 PlayStation, 2 Switch).
 int BurstLimitButtonStyleNow();
+rex::ui::ButtonGlyphs BurstLimitGlyphsForStyle(int style);
 // burstlimit_mods.cpp
 std::vector<std::pair<std::string, bool>> BurstLimitModsList();
 std::string BurstLimitModsSetBeforeBoot(const std::vector<bool>& on);
@@ -108,8 +110,15 @@ bool HttpGet(const std::wstring& url, int timeout_ms,
   if (!WinHttpCrackUrl(url.c_str(), 0, 0, &parts)) {
     return false;
   }
-  HINTERNET session = WinHttpOpen(L"burstlimit", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-                                  WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+  // Wine's WinHTTP doesn't know the automatic proxy type (it means "no proxy"
+  // there, skipping a proxy set up for Wine): its default settings instead.
+  static const bool wine = [] {
+    HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    return ntdll && GetProcAddress(ntdll, "wine_get_version");
+  }();
+  HINTERNET session = WinHttpOpen(
+      L"burstlimit", wine ? WINHTTP_ACCESS_TYPE_DEFAULT_PROXY : WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+      WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
   if (!session) {
     return false;
   }
@@ -434,12 +443,14 @@ class StartScreen final : public rex::ui::ImGuiDialog {
     if (url_.empty()) {
       info_.state = LobbyInfo::State::kOff;
     } else {
-      worker_ = std::thread([this] { Poll(); });
+      worker_ = std::thread([shared = shared_, url = url_] { Poll(shared, url); });
     }
     const std::string update_url = REXCVAR_GET(update_check_url);
     if (!update_url.empty() && ParseVersion(BURSTLIMIT_VERSION, own_version_)) {
       update_.state = UpdateInfo::State::kChecking;
-      update_thread_ = std::thread([this, update_url] { CheckForUpdate(update_url); });
+      update_thread_ = std::thread([shared = shared_, update_url, own = own_version_] {
+        CheckForUpdate(shared, update_url, own);
+      });
     }
   }
 
@@ -449,11 +460,23 @@ class StartScreen final : public rex::ui::ImGuiDialog {
       stop_ = true;
     }
     wake_.notify_all();
+    // The lobby poll and the update check only touch the shared state (kept
+    // alive by them): never wait for them here. They can be inside a slow
+    // HTTP request (seconds under Wine / Proton, or on a bad connection), and
+    // this runs on the UI thread when Play is pressed - waiting would leave a
+    // black, "not responding" window (GitHub #25). They end on their own.
     if (worker_.joinable()) {
-      worker_.join();
+      worker_.detach();
     }
     if (update_thread_.joinable()) {
-      update_thread_.join();
+      if (update_thread_downloads_) {
+        // A download / install (Play is refused meanwhile, only Quit ends it):
+        // it uses this screen, so wait for it.
+        rex::ui::UIThreadPhase phase("closing the start screen (update download)");
+        update_thread_.join();
+      } else {
+        update_thread_.detach();
+      }
     }
   }
 
@@ -464,13 +487,7 @@ class StartScreen final : public rex::ui::ImGuiDialog {
       return;
     }
     // The settings menu's hints (L1 / R1, ...) for the controller in use.
-    static constexpr rex::ui::ButtonGlyphs kGlyphs[3] = {
-        rex::ui::ButtonGlyphs::kXbox, rex::ui::ButtonGlyphs::kPlayStation,
-        rex::ui::ButtonGlyphs::kNintendo};
-    const int style = BurstLimitButtonStyleNow();
-    if (style >= 0 && style < 3) {
-      rex::ui::SetButtonGlyphs(kGlyphs[style]);
-    }
+    rex::ui::SetButtonGlyphs(BurstLimitGlyphsForStyle(BurstLimitButtonStyleNow()));
     // Behind ImGui windows: the settings menu (a window) opens over this screen.
     ImDrawList* draw = ImGui::GetBackgroundDrawList();
     // The game's own menu look once its art is read (a moment after the
@@ -1168,8 +1185,9 @@ class StartScreen final : public rex::ui::ImGuiDialog {
     }
   }
 
-  void Poll() {
-    const std::wstring url = Widen(url_);
+  struct Shared;
+  static void Poll(std::shared_ptr<Shared> shared, std::string rooms_url) {
+    const std::wstring url = Widen(rooms_url);
     for (;;) {
       const std::string body = HttpGetText(url, 5000);
       LobbyInfo info;
@@ -1188,12 +1206,16 @@ class StartScreen final : public rex::ui::ImGuiDialog {
       } catch (...) {
         info.state = LobbyInfo::State::kError;
       }
-      std::unique_lock<std::mutex> lock(mutex_);
-      if (info.state == LobbyInfo::State::kError) {
-        REXLOG_WARN("Start screen: the lobby's rooms couldn't be read ({})", url_);
+      std::unique_lock<std::mutex> lock(shared->mutex);
+      if (shared->stop) {
+        return;
       }
-      info_ = std::move(info);
-      if (wake_.wait_for(lock, std::chrono::seconds(10), [this] { return stop_; })) {
+      if (info.state == LobbyInfo::State::kError) {
+        REXLOG_WARN("Start screen: the lobby's rooms couldn't be read ({})", rooms_url);
+      }
+      shared->info = std::move(info);
+      if (shared->wake.wait_for(lock, std::chrono::seconds(10),
+                                [&shared] { return shared->stop; })) {
         return;
       }
     }
@@ -1201,14 +1223,15 @@ class StartScreen final : public rex::ui::ImGuiDialog {
 
   // The latest GitHub release: newer than this build, with a zip for this
   // platform (the -linux one under Wine / Proton)?
-  void CheckForUpdate(const std::string& url) {
+  static void CheckForUpdate(std::shared_ptr<Shared> shared, const std::string& url,
+                             std::array<int, 3> own_version) {
     UpdateInfo found;
     found.state = UpdateInfo::State::kNone;
     try {
       const json release = json::parse(HttpGetText(Widen(url), 8000));
       found.tag = release.value("tag_name", std::string());
       std::array<int, 3> latest = {};
-      if (ParseVersion(found.tag, latest) && latest > own_version_ &&
+      if (ParseVersion(found.tag, latest) && latest > own_version &&
           !release.value("draft", false)) {
         const bool want_linux = UnderWine();
         for (const json& asset : release.value("assets", json::array())) {
@@ -1229,9 +1252,9 @@ class StartScreen final : public rex::ui::ImGuiDialog {
     } catch (...) {
       REXLOG_WARN("Start screen: couldn't check for updates ({})", url);
     }
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (update_.state == UpdateInfo::State::kChecking) {
-      update_ = found;
+    std::lock_guard<std::mutex> lock(shared->mutex);
+    if (shared->update.state == UpdateInfo::State::kChecking) {
+      shared->update = found;
     }
   }
 
@@ -1252,6 +1275,7 @@ class StartScreen final : public rex::ui::ImGuiDialog {
     if (update_thread_.joinable()) {
       update_thread_.join();
     }
+    update_thread_downloads_ = true;
     update_thread_ = std::thread([this, url] { DownloadAndInstall(url); });
   }
 
@@ -1295,13 +1319,24 @@ class StartScreen final : public rex::ui::ImGuiDialog {
   std::function<void()> settings_;
   fs::path config_;
   std::string url_;
+  // What the lobby poll and the update check threads share with this screen:
+  // owned by them too, so they can outlive it (see ~StartScreen).
+  struct Shared {
+    std::mutex mutex;
+    std::condition_variable wake;
+    bool stop = false;
+    LobbyInfo info;
+    UpdateInfo update;
+  };
+  std::shared_ptr<Shared> shared_ = std::make_shared<Shared>();
   std::thread worker_;
   std::thread update_thread_;
-  std::mutex mutex_;
-  std::condition_variable wake_;
-  bool stop_ = false;
-  LobbyInfo info_;
-  UpdateInfo update_;
+  bool update_thread_downloads_ = false;
+  std::mutex& mutex_ = shared_->mutex;
+  std::condition_variable& wake_ = shared_->wake;
+  bool& stop_ = shared_->stop;
+  LobbyInfo& info_ = shared_->info;
+  UpdateInfo& update_ = shared_->update;
   std::array<int, 3> own_version_ = {};
   std::atomic<uint64_t> download_done_{0};
   std::atomic<uint64_t> download_total_{0};

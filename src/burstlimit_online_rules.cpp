@@ -614,7 +614,11 @@ void BurstLimitOnlineRulesFrame(rex::memory::Memory* memory) {
 // both PCs write the room's rules into it - the host its acknowledged rules,
 // the guest the ones it received (the same; the host's menu doesn't close
 // before the guest has them).
+// burstlimit_achievements.cpp: the one_hit_kill test option (offline only).
+void BurstLimitOneHitKillBattleSetup();
+
 void BurstLimitOnlineRulesBattleSetup() {
+  BurstLimitOneHitKillBattleSetup();
   rex::memory::Memory* memory = GuestMemory();
   const int side = LocalSide(memory);
   if (side < 0) {

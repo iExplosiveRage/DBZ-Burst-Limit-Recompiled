@@ -39,6 +39,7 @@
 
 // burstlimit_buttons.cpp: the button_icons style now (0 Xbox, 1 PlayStation, 2 Switch).
 int BurstLimitButtonStyleNow();
+rex::ui::ButtonGlyphs BurstLimitGlyphsForStyle(int style);
 
 #pragma comment(lib, "bcrypt.lib")
 #pragma comment(lib, "comdlg32.lib")
@@ -147,13 +148,8 @@ class Installer final : public rex::ui::ImGuiDialog {
     // Behind ImGui windows: the settings menu (F1, a window) opens over this.
     ImDrawList* draw = ImGui::GetBackgroundDrawList();
     // The settings menu's button hints for the controller in use.
-    static constexpr rex::ui::ButtonGlyphs kGlyphs[3] = {rex::ui::ButtonGlyphs::kXbox,
-                                                         rex::ui::ButtonGlyphs::kPlayStation,
-                                                         rex::ui::ButtonGlyphs::kNintendo};
     const int style = BurstLimitButtonStyleNow();
-    if (style >= 0 && style < 3) {
-      rex::ui::SetButtonGlyphs(kGlyphs[style]);
-    }
+    rex::ui::SetButtonGlyphs(BurstLimitGlyphsForStyle(style));
     const float frame_w = std::min(io.DisplaySize.x, io.DisplaySize.y * 16.0f / 9.0f);
     const float u = frame_w / 1280.0f;
     const ImVec2 origin((io.DisplaySize.x - frame_w) * 0.5f,

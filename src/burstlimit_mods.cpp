@@ -1,5 +1,6 @@
 // Mods: packs of replacement game files, switched on or off in a "Mods" entry
-// added to the main menu under Options.
+// added to the main menu under Options. (The "Exit Game" entry under it,
+// burstlimit_exit.cpp, is added and confirmed by the same hooks and panel.)
 //
 // A mod is a folder in <burstlimit.exe folder>\mods\. Its files are named
 // like the files inside the game's archive LONG2DATA_US.CPK (e.g.
@@ -1577,15 +1578,21 @@ bool SameFile(const std::filesystem::path& a, const std::filesystem::path& b) {
 constexpr uint32_t kListItems = 3524;   // the items' container: +0 count
 constexpr uint32_t kListCursor = 3592;
 constexpr uint32_t kModsItem = 6;       // after Options (5)
+constexpr uint32_t kExitItem = 7;       // "Exit Game" after Mods (burstlimit_exit.cpp)
 constexpr uint32_t kOptionsItem = 5;
 // The description box keeps the id of the message it shows (and skips the
 // same id); the main menu's are 7-12, so this one can't clash.
 constexpr uint32_t kModsHelpId = 0x4D4F44;
+constexpr uint32_t kExitHelpId = 0x455849;
 constexpr const char16_t* kModsLabel = u"Mods";
 constexpr const char16_t* kModsHelp = u"Turn mods on or off.";
+constexpr const char16_t* kExitLabel = u"Exit Game";
+constexpr const char16_t* kExitHelp = u"Close the game.";
 
 std::atomic<uint32_t> g_main_list{0};
 std::atomic<bool> g_open_request{false};
+// "Exit Game" was picked: the panel opens as its "Exit the game?" question.
+std::atomic<bool> g_exit_request{false};
 
 // The game's menu sounds (sub_8210C198, bank 0, as its lists play them in
 // sub_8228DDA0): queued by the panel, played on the game's thread by the
@@ -1605,7 +1612,7 @@ void PlayMenuSound(uint32_t sound) {
     g_sounds.push_back(sound);
   }
 }
-uint32_t g_label = 0, g_help = 0;
+uint32_t g_label = 0, g_help = 0, g_exit_label = 0, g_exit_help = 0;
 bool g_adding = false;
 
 rex::memory::Memory* GuestMemory() {
@@ -1638,7 +1645,7 @@ bool IsModsList(rex::memory::Memory* memory, uint32_t list) {
     return false;
   }
   const uint32_t items = R32(memory, list + kListItems);
-  return items && R32(memory, items) == kModsItem + 1;
+  return items && R32(memory, items) == kExitItem + 1;
 }
 
 // The character select's textures (UICHS_TOP.NUT) with the extra characters'
@@ -1984,20 +1991,34 @@ namespace {
 // r30 = the list, its 6 items just added), before it's measured: adds "Mods"
 // by running the last add again (bl sub_82288A70 at 0x8224F7AC with r3 = the
 // list, r4 = the text), which comes back here.
+// Then "Exit Game" after it the same way (the add comes back here once more
+// with 7 items).
 bool BurstLimitModsMenuAddItem(PPCRegister& r3, PPCRegister& r4, PPCRegister& r30) {
-  if (g_adding) {
-    g_adding = false;
-    return false;
-  }
   auto* memory = GuestMemory();
   if (!memory || !r30.u32) {
+    g_adding = false;
     return false;
   }
   if (!g_label) {
     g_label = GuestText(memory, kModsLabel);
   }
+  if (!g_exit_label) {
+    g_exit_label = GuestText(memory, kExitLabel);
+  }
   const uint32_t items = R32(memory, r30.u32 + kListItems);
-  if (!g_label || !items || R32(memory, items) != kModsItem) {
+  const uint32_t count = items ? R32(memory, items) : 0;
+  if (g_adding) {
+    // Back from adding Mods: Exit Game next; back from that: done.
+    if (count != kExitItem || !g_exit_label) {
+      g_adding = false;
+      return false;
+    }
+    REXLOG_INFO("Main menu: Exit Game entry added (list {:08X})", r30.u32);
+    r3.u64 = r30.u32;
+    r4.u64 = g_exit_label;
+    return true;
+  }
+  if (!g_label || !g_exit_label || count != kModsItem) {
     return false;
   }
   g_main_list.store(r30.u32, std::memory_order_relaxed);
@@ -2010,9 +2031,9 @@ bool BurstLimitModsMenuAddItem(PPCRegister& r3, PPCRegister& r4, PPCRegister& r3
 
 // Mid-asm hook at 0x82251278 in sub_82251108 (the main menu, the cursor moved:
 // r30 = the item): the pictures and the slogan behind the list come from
-// 6-entry tables - Mods keeps Options' ones.
+// 6-entry tables - Mods and Exit Game keep Options' ones.
 void BurstLimitModsMenuArtCursor(PPCRegister& r30) {
-  if (r30.s32 == int32_t(kModsItem)) {
+  if (r30.s32 == int32_t(kModsItem) || r30.s32 == int32_t(kExitItem)) {
     r30.u64 = kOptionsItem;
   }
 }
@@ -2021,10 +2042,10 @@ void BurstLimitModsMenuArtCursor(PPCRegister& r30) {
 // description, only for items 0-5): Mods gets its own (jumps to 0x822517B4
 // with r30 = its id, r3 = 0).
 bool BurstLimitModsMenuHelpIndex(PPCRegister& r3, PPCRegister& r30) {
-  if (r3.u32 != kModsItem) {
+  if (r3.u32 != kModsItem && r3.u32 != kExitItem) {
     return false;
   }
-  r30.u64 = kModsHelpId;
+  r30.u64 = r3.u32 == kModsItem ? kModsHelpId : kExitHelpId;
   r3.u64 = 0;
   return true;
 }
@@ -2033,38 +2054,48 @@ bool BurstLimitModsMenuHelpIndex(PPCRegister& r3, PPCRegister& r30) {
 // is looked up (bl sub_822803E0, r30 = its id): Mods' text (jumps to
 // 0x822517CC with r3 = it).
 bool BurstLimitModsMenuHelpText(PPCRegister& r3, PPCRegister& r30) {
-  if (r30.u32 != kModsHelpId) {
+  if (r30.u32 != kModsHelpId && r30.u32 != kExitHelpId) {
     return false;
   }
   auto* memory = GuestMemory();
   if (!memory) {
     return false;
   }
-  if (!g_help) {
-    g_help = GuestText(memory, kModsHelp);
+  uint32_t& text = r30.u32 == kModsHelpId ? g_help : g_exit_help;
+  if (!text) {
+    text = GuestText(memory, r30.u32 == kModsHelpId ? kModsHelp : kExitHelp);
   }
-  if (!g_help) {
+  if (!text) {
     return false;
   }
-  r3.u64 = g_help;
+  r3.u64 = text;
   return true;
 }
 
 // Mid-asm hook at 0x8228E8DC in sub_8228DDA0 (a list's input, its cursor
 // on an item: beq when the confirm button isn't pressed, r31 = the list). A
-// on Mods opens the Mods panel instead of confirming the main menu.
+// on Mods opens the Mods panel instead of confirming the main menu; A on
+// Exit Game opens it as the "Exit the game?" question.
 void BurstLimitModsMenuConfirm(PPCCRRegister& cr6, PPCRegister& r31) {
   if (cr6.eq) {
     return;
   }
   auto* memory = GuestMemory();
-  if (!IsModsList(memory, r31.u32) || R32(memory, r31.u32 + kListCursor) != kModsItem) {
+  if (!IsModsList(memory, r31.u32)) {
+    return;
+  }
+  const uint32_t cursor = R32(memory, r31.u32 + kListCursor);
+  if (cursor != kModsItem && cursor != kExitItem) {
     return;
   }
   cr6.eq = 1;
-  if (!g_open_request.exchange(true)) {
-    REXLOG_INFO("Mods menu: opened from the main menu");
+  if (g_open_request.load()) {
+    return;
   }
+  g_exit_request.store(cursor == kExitItem);
+  g_open_request.store(true);
+  REXLOG_INFO("{}: opened from the main menu",
+              cursor == kExitItem ? "Exit game question" : "Mods menu");
 }
 
 // Mid-asm hook at 0x82251620 in sub_82251108 (the main menu, every frame,
@@ -2232,6 +2263,9 @@ std::string BurstLimitModsSetBeforeBoot(const std::vector<bool>& on) {
 
 // ---------------------------------------------------------------- the panel
 
+// burstlimit_exit.cpp: closes the game (the window's close path).
+void BurstLimitExitGame(const char* from);
+
 namespace {
 
 constexpr uint16_t kPadUp = 0x0001;
@@ -2278,7 +2312,7 @@ constexpr size_t kOptionsRadar = 19;
 
 constexpr const char* kRegions[] = {"US", "UK", "FR", "IT", "SP", "DU", "JP"};
 
-enum class View { kMain, kBrowse, kReview };
+enum class View { kMain, kBrowse, kReview, kExit };
 enum class Filter { kAll, kOn, kOff };
 
 class ModsPanel final : public rex::ui::ImGuiDialog {
@@ -2391,7 +2425,8 @@ class ModsPanel final : public rex::ui::ImGuiDialog {
     }
     open_ = true;
     open_time_ = -1.0;
-    view_ = View::kMain;
+    // From the main menu's Exit Game: "Exit the game?", No first.
+    view_ = g_exit_request.load() ? View::kExit : View::kMain;
     selected_ = 0;
     scroll_ = 0;
     message_.clear();
@@ -2408,6 +2443,7 @@ class ModsPanel final : public rex::ui::ImGuiDialog {
 
   void Close() {
     open_ = false;
+    g_exit_request.store(false, std::memory_order_relaxed);
     g_open_request.store(false, std::memory_order_relaxed);
     if (blocking_) {
       blocking_ = false;
@@ -2659,6 +2695,20 @@ class ModsPanel final : public rex::ui::ImGuiDialog {
           selected_ = 2;
         }
         break;
+      case View::kExit:
+        if (back || (activate && selected_ == 0)) {
+          PlayMenuSound(kSoundCancel);
+          REXLOG_INFO("Exit game question: no");
+          Close();
+          return;
+        }
+        if (activate) {
+          PlayMenuSound(kSoundConfirm);
+          Close();
+          BurstLimitExitGame("the main menu");
+          return;
+        }
+        break;
     }
   }
 
@@ -2670,6 +2720,8 @@ class ModsPanel final : public rex::ui::ImGuiDialog {
         return FilteredMods(state).size();
       case View::kReview:
         return 1;
+      case View::kExit:
+        return 2;
     }
     return 0;
   }
@@ -3152,6 +3204,12 @@ class ModsPanel final : public rex::ui::ImGuiDialog {
           rows.push_back({line, "", kTextWhite, kTextWhite});
         }
         help = "Apply uses these switches: files load with them from their next load.";
+        break;
+      }
+      case View::kExit: {
+        title = "Exit Game";
+        rows = {{"No", "", kTextWhite, kTextWhite}, {"Yes", "", kTextWhite, kTextWhite}};
+        help = "Exit the game? What the game has saved is kept (it saves on its own).";
         break;
       }
     }

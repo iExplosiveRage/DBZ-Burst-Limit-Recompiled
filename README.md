@@ -105,7 +105,8 @@ normal Windows program instead of inside an emulator.
   on RTX GPUs, applied to the 3D scene before the HUD, with the jitter and camera motion vectors it needs
   reconstructed from the game's draws. **DLAA** keeps the chosen resolution; **Quality**, **Balanced**,
   **Performance** and **Ultra Performance** render the scene lower and upscale it, for more FPS, while the HUD
-  is still drawn at the full resolution.
+  is still drawn at the full resolution. Since 0.7.3, DLSS/FSR Quality modes on the native renderer are much
+  sharper (frame-pacing fix) and use NVIDIA's recommended mip bias.
 - **Sharper picture** (`soft_filter`): the game's last pass blurs the whole picture slightly (a soft look made
   for 720p). Above 720p it took away much of the resolution's sharpness, so it's off by default now; turn it
   back on in Settings > Effects > Soft filter.
@@ -141,7 +142,8 @@ normal Windows program instead of inside an emulator.
   controller in use, by position (A = Cross / B, B = Circle / A, LB = L1 / L, ...), drawn at high resolution, and
   the Xbox 360 pad of Control Settings and the tutorial becomes an Xbox Series controller, a DualSense or a pair
   of Joy-Cons. **Auto**
-  follows the controller you play with; Settings > Game > Button icons picks one.
+  follows the controller you play with (and shows the keys once you play on the keyboard, since 0.7.3); Settings >
+  Game > Button icons picks one.
 - **FPS panel** (F3): frame rate, frame time graph, render resolution and upscaler, in any corner. Since 0.6.1
   the FPS, its **1% low** and the graph are measured from the real presents to the screen (what RTSS /
   PresentMon see), so uneven presentation shows even when the game's own frames are even. The `perf_report`
@@ -151,6 +153,22 @@ normal Windows program instead of inside an emulator.
   in `LONG2DATA_US.CPK` (for example `BCGOK002.NUX`); PlayStation 3 model mods are converted on the fly. Switches
   apply without restarting, from each file's next load. The game's archive itself is never changed. Online, rooms
   only match players with the same mods on. See [Mods](#mods).
+- **Exit Game** (since 0.7.3, #21): an **Exit Game** entry in the main menu, under Mods ("Exit the game?" No /
+  Yes), and **Exit game** in F1 > GAME (A, then A again): closes the game like its window's close button, without
+  Alt+F4.
+- **Drama sequences** (since 0.7.3, #21, `drama_pieces`, F1 > GAME, on by default): **Off** removes the Drama
+  Pieces - the short cut-scenes that interrupt a fight (a partner stepping in, story moments in Z Chronicles) - in every mode. The
+  opening / ending scenes stay (the game's own cut-scenes rule decides those). Online (lobby) the host's setting
+  is used by both players; over Radmin / LAN the game's default (on).
+- **Keyboard controls** (since 0.7.3, #24, `mnk_mode`, on by default): play with the keyboard, with or without a
+  controller. The game's button prompts, command lists and tutorials then show the keys, every key can be changed
+  in **F1 > KEYBOARD**, and the keyboard can be player 2 next to a controller. See [Controls](#controls).
+- **Achievement popups** (since 0.7.3, `achievement_popups`): when you earn one of the game's 50 achievements, a
+  popup in the game's menu style shows its picture, name, description and gamerscore as a **bronze, silver or
+  gold trophy** (by gamerscore), with that tier's sound (trophy sounds by Spade; F1 > GAME > Achievement sound
+  has other choices), and a **platinum** popup once all 50 are unlocked. **F7** opens the achievements window in
+  the same style - progress, trophies per tier, All / Unlocked / Locked tabs and every achievement with its
+  unlock date, the secret ones with their real text - and works with the controller (B closes it).
 - **Ki charge** (`ki_charge`, `ki_charge_rate`, off by default): hold **L3** to charge Ki, like Shin Budokai - on
   the ground or in the air, with a finishing pose when the gauge is full, the Aura Spark motion and wind / dust in
   your aura's color. Works online (the host's setting is used by both players).
@@ -235,6 +253,9 @@ Download `DBZ-Burst-Limit-Recompiled-*-linux.zip` instead: the same build with
 (Direct3D 12 to Vulkan) next to it and a `run_linux.sh` launcher for Wine. Put your game files in
 `game_data_root` and run `./run_linux.sh`. Steam / Proton works too: add `burstlimit.exe` as a non-Steam game
 and force Proton Experimental in its Compatibility settings. The `.iso` install works there too.
+Since 0.7.3 (#25) the window no longer waits forever for the display or for the start screen's lobby / update
+checks, and if it still stops answering, `burstlimit.log` says where (`ui_watchdog`) and names the Wine / Proton
+version - please attach it to an issue.
 
 ---
 
@@ -394,10 +415,32 @@ settings menu (F1). Any setting can also be passed on the command line, e.g. `--
 ### Controls
 - Xbox, PlayStation and Nintendo Switch controllers work out of the box (also on the start screen and the
   installer).
-- Keyboard: start with `--mnk_mode=true` (Space = A, Backspace = B, Enter = Start, WASD = move).
+- **Keyboard** (on by default, with or without a controller - both work together; the prompts then show the
+  keys, from the same Xelu icon pack):
+
+  | Key | Does | Pad |
+  |---|---|---|
+  | W A S D / arrow keys | Move (menus: select) | Left stick |
+  | Enter | Menus: confirm (Start at the title). Fight: pause | A (+ Start) / Start |
+  | Esc | Menus: back. Fight: pause | B / Start |
+  | Space or L | Guard (menus: confirm) | A |
+  | K or Backspace | Ki Blast (menus: back) | B |
+  | J | Rush Attack | X |
+  | I | Smash Attack | Y |
+  | Q / E | Aura Spark / Transform | LB / RB |
+  | U / O | Blow-Away Attack / Pursuit | LT / RT |
+  | F / G | L3 (Ki charge) / R3 | L3 / R3 |
+  | Tab | Back | Back |
+  | Shift + arrows / Shift + WASD | D-pad | D-pad |
+  | Numpad 8 4 6 2 | Right stick | Right stick |
+
+  Every key can be changed in **F1 > KEYBOARD** ("Default keys" puts them back). **Keyboard player: Player 2**
+  makes the keyboard player 2 next to a controller (local Versus: press Enter when the game asks player 2 for a
+  controller). Keyboard play off: `mnk_mode = false`.
 - **F1** or **Back + Start**: settings menu (the buttons can be changed to L3 + R3 in the menu). **Y** in the
   menu turns the free camera on or off.
 - **F3**: FPS panel.
+- **F7**: achievements window (controller: up / down, LB / RB tabs, B closes).
 - Character select: **RB / LB** change the start form (transformation), next to **Y** (Change Color).
 - **Insert**: free camera on / off. **Numpad 0**: freeze the game. Both keys can be changed in the settings
   menu (Game).
@@ -422,6 +465,13 @@ settings menu (F1). Any setting can also be passed on the command line, e.g. `--
 | `widescreen_hud` | `edges` | With a wider `aspect_ratio`: `edges` = the battle HUD's sides (life bars, ki gauges) at the screen's edges, `center` = all of it in the middle 16:9. |
 | `show_hud` | `true` | The fight's HUD (life and Ki gauges, portraits, prompts); off hides it during play, the pause menu still shows. |
 | `menu_sounds` | `true` | The game's menu sounds on the start screen and in the settings menu. |
+| `achievement_popups` | `true` | A popup in the game's menu style when you earn one of the game's achievements: its picture, name, description, gamerscore and trophy tier (each one pops once per profile; unlocks are kept in `<user data>\achievements\<profile>\424107DC.toml`). F1 > GAME also lists all 50. |
+| `achievement_sound` | `tiers` | The sound with a popup: `tiers` (a sound per trophy tier, see below), `xbox` (a rising bloop), `playstation` (a bell sparkle), `custom` (your own file, see `achievement_sound_file`), `game` (one of the game's own sound effects, see `achievement_game_sound`) or `off`. The built-in chimes are original sounds made by the recomp at run time, not the consoles' own. |
+| `achievement_sound_bronze` / `_silver` / `_gold` / `_platinum` | `sounds/trophy_<tier>.mp3` | With `achievement_sound = "tiers"`: every achievement is a trophy, from its gamerscore - **bronze** up to 15G (30 of the 50), **silver** 20-35G (14), **gold** 40G and up (6) - and the **platinum** pops after the achievement that completes the list (once: never for unlocks read back from the profile). Each tier plays its file, a `.wav` or `.mp3` (a full path or relative to the exe's folder); the defaults are the trophy sounds by Spade (free) in `sounds\`. Empty or missing = a chime made by the recomp for that tier. F1 > GAME > Trophy tiers shows each tier's popup and plays its sound. |
+| `achievement_sound_file` | *(empty)* | With `achievement_sound = "custom"` (F1 > GAME > Achievement sound > Custom file): a `.wav` or `.mp3` to play, a full path or relative to the exe's folder. Empty = **drop your own sound in `sounds\achievement.wav` or `sounds\achievement.mp3` next to `burstlimit.exe`**. Any sample rate; follows `achievement_volume` and the game's Sound Effects volume. |
+| `achievement_game_sound` | `SYSTEM_SE:17` | With `achievement_sound = "game"`: which of the game's sound effects, as `BANK:cue` (F1 > GAME > Game sound picks one), played from your own game files. |
+| `achievement_volume` | `80` | Volume of the chime in percent, times the game's own Sound Effects volume. |
+| `achievement_popup_position` | `bottom` | `bottom`, `bottom_left`, `bottom_right`, `top`, `top_left` or `top_right`. |
 | `discord_presence` | `true` | Show what you're playing on your Discord profile. |
 | `frame_rate` | *(empty)* | Frame rate cap: `30` (the original), `60`, `120`, `144`, `display` (the monitor's refresh rate) or `unlocked`. Empty = from `patch_60fps` and `vsync` (older settings). |
 | `present_vsync` | `true` | VSync: each frame is shown whole from the monitor's next refresh, one per refresh, and a frame rate the refresh rate is a multiple of (60 on 60/120/240 Hz, 144 on 144 Hz, `display`) is locked to the monitor - even motion. G-Sync / FreeSync still work. `false` = present at once, tearing allowed. |
@@ -442,6 +492,10 @@ settings menu (F1). Any setting can also be passed on the command line, e.g. `--
 | `free_camera` | `false` | Free camera (always off at startup). |
 | `freeze_game` | `false` | Stops the fight and its cinematics for the free camera, offline only (always off at startup). |
 | `bind_free_camera` / `bind_freeze_game` | `Insert` / `Numpad0` | Keyboard keys for the free camera and freeze. |
+| `mnk_mode` | `true` | Keyboard play (the keyboard works as a controller, next to the pads). |
+| `keyboard_player` | `1` | The player the keyboard controls: `1` (with the first controller) or `2`-`4`. |
+| `keybind_a` ... `keybind_menu_back` | see Controls | The keys of keyboard play: a comma-separated list, a key optionally with `Shift+` / `Ctrl+` / `Alt+` (`keybind_x = "J"`, `keybind_lstick_up = "W,Up"`). |
+| `hid_generic_mapping` | `true` | Controllers SDL doesn't know (some DirectInput-only and laptop gamepads) get a generic layout instead of being ignored. |
 | `dlss_mode` | `off` | NVIDIA DLSS (RTX GPUs, experimental): `dlaa` (anti-aliasing at the chosen resolution), or `quality`, `balanced`, `performance`, `ultra_performance` (render lower and upscale). Native renderer: at NVIDIA's own ratio of any resolution, like a PC game (66.7% / 58% / 50% / 33.3%); Emulated: in whole steps of 720p (at 4K the first three render at 1440p and `ultra_performance` at 720p). |
 | `dlss_preset` | `m` | DLSS model: `k`, `l` or `m`. |
 | `fsr_mode` | `off` | AMD FSR for the 3D scene (FSR 4 on GPUs that have it, FSR 3.1.5 elsewhere), used while `dlss_mode` is off: `native_aa`, or `quality`, `balanced`, `performance`, `ultra_performance` (render lower and upscale; Native renderer: AMD's own ratios 67% / 59% / 50% / 33%, Emulated: whole steps like DLSS). |
@@ -454,11 +508,12 @@ settings menu (F1). Any setting can also be passed on the command line, e.g. `--
 | `extra_stages` | `true` | The three Z Chronicles stages on the Versus / Training stage select (offline). |
 | `extra_characters` | `true` | Extra characters from mods (`slot.toml`): R2 on the Versus / Training character select shows them (online too, since 0.7.1, when both players have the same mods). |
 | `input_delay` | `reduced` | Offline fights: `reduced` = no extra delay, `original` = the game's own 3 frames. From the next fight; online uses `online_input_delay`. |
+| `drama_pieces` | `true` | Drama Pieces during fights; `false` = none (opening / ending scenes stay). Online: the host's value is used by both. |
 | `ki_charge` | `false` | Hold L3 to charge Ki (Shin Budokai style). Online: the host's value is used by both. |
 | `ki_charge_rate` | `16` | Ki added per frame while charging (the gauge holds 3000). |
 | `mods_enabled` | `true` | Use the mods switched on in the Mods menu (`mods\mods.toml`). |
 | `online_branding` | `true` | "Online" instead of "Xbox LIVE" in the menus and the Online Battle title. |
-| `button_icons` | `auto` | Button icons in the game's prompts: `auto` (the controller in use; Xbox for the keyboard or an unknown pad), `xbox` (Xbox Series), `playstation` or `switch`. |
+| `button_icons` | `auto` | Button icons in the game's prompts: `auto` (the controller in use - Xbox for an unknown pad - or the keys once the keyboard is used), `xbox` (Xbox Series), `playstation`, `switch` or `keyboard`. |
 | `quick_menu_buttons` | `back+start` | Controller buttons for the settings menu: `back+start`, `l3+r3` or `none` (F1 always works). |
 | `debug_overlay` | `false` | FPS panel (F3): FPS and 1% low of the real presents, frame time graph, render resolution, upscaler. |
 | `debug_overlay_position` | `top-left` | `top-left`, `top-right`, `bottom-left` or `bottom-right`. |
@@ -493,6 +548,7 @@ settings menu (F1). Any setting can also be passed on the command line, e.g. `--
 | `texture_folder` | *(exe folder)/textures* | Override the textures folder. |
 | `log_level` | `info` | `debug` / `info` / `warning` / `error`. |
 | `log_file` | *(empty)* | Log file (relative paths are from the working folder). The release `burstlimit.toml` sets `burstlimit.log`, next to the exe; empty = numbered files in `logs`. |
+| `ui_watchdog` | `true` | When the window stops answering for 5 s or more, the log says what it was busy with (and again when it answers). |
 
 ---
 
@@ -665,11 +721,14 @@ mods/
 | `src/burstlimit_mods.cpp` | Mods menu, virtual archive with the mod files, PS3 -> Xbox 360 model conversion. |
 | `src/burstlimit_slots.cpp` | Extra characters from mods (`slot.toml`): the character select's R2 page and the fighter's own files. |
 | `src/burstlimit_kicharge.cpp` | Ki charge (hold L3). |
+| `src/burstlimit_drama.cpp` | Drama sequences on / off (the fight's Drama Piece slots). |
+| `src/burstlimit_exit.cpp` | Exit Game (main menu entry, settings menu item). |
 | `src/burstlimit_branding.cpp` | "Online" instead of "Xbox LIVE" (text and title art). |
 | `src/burstlimit_saves.cpp` | Save export / import. |
-| `src/burstlimit_quickfight.cpp` | Debug / automated tests only: `--quick_fight=<spec>` (or the console command `quick_fight_now <spec>`) goes straight into a Training or Versus fight, e.g. `--quick_fight=training,goku:ssj,krillin,plains`. Does nothing unless it's used. |
-| `src/burstlimit_buttons.cpp` | PlayStation / Switch button icons, drawn into the game's textures as they load (`burstlimit_button_icons.inc`: the icons, made by `scripts/make_button_icons.py`). |
-| `res/` | Application icon (embedded into the exe). |
+| `src/burstlimit_quickfight.cpp` | Debug / automated tests only: `--quick_fight=<spec>` (or the console command `quick_fight_now <spec>`) goes straight into a Training or Versus fight, e.g. `--quick_fight=training,goku:ssj,krillin,plains`, or into Z Chronicles episode 1 (`zc`; `zc,save` goes through the title's storage prompt first, which the game needs to award the episode's achievement). Does nothing unless it's used. |
+| `src/burstlimit_achievements.cpp` | The achievement popup (game-styled toast, queue, trophy tiers and the platinum, sounds per tier with chimes made at run time as the fallback) and its settings; debug `achievement_test <id\|all\|tier>`, `achievement_tier_test <bronze\|silver\|gold\|platinum\|all>`, `achievement_unlock <id>`, `achievement_list`, `achievement_sound_test`, `one_hit_kill`. |
+| `src/burstlimit_buttons.cpp` | PlayStation / Switch button icons and keyboard key icons, drawn into the game's textures as they load (`burstlimit_button_icons.inc` / `burstlimit_key_icons.inc`: the icons, made by `scripts/make_button_icons.py` / `scripts/make_key_icons.py`). |
+| `res/` | Application icon (embedded into the exe); `res/sounds`: the trophy sounds by Spade (copied to `sounds\` next to the exe by the build, their credit to `licenses\`). |
 | `generated/rexglue.cmake` | ReXGlue build glue. `generated/default/` is produced by the build. |
 | `thirdparty/rexglue-sdk` | ReXGlue SDK (submodule, `burstlimit` branch). |
 | `scripts/` | Online launch helpers; `make_button_icons.py`. |
@@ -689,7 +748,8 @@ generated code (it is regenerated on every build).
 - [libjuice](https://github.com/paullouisageneau/libjuice) (ICE / STUN / TURN for online play), MPL-2.0, used
   unmodified (`thirdparty/rexglue-sdk/thirdparty/libjuice`).
 - [Xelu's Free Controller Prompts](https://thoseawesomeguys.com/prompts/) by Nicolae "Xelu" Berbece, CC0 (public
-  domain) - the PlayStation and Nintendo Switch button icons.
+  domain) - the PlayStation and Nintendo Switch button icons and the keyboard key icons.
+- Trophy sounds by Spade (free) - the default achievement sounds (`achievement_sound = "tiers"`), `res/sounds`, shipped as `sounds\trophy_*.mp3`.
 - Dragon Ball Z: Burst Limit © Bird Studio/Shueisha, Toei Animation. Published by Bandai Namco Games.
 
 ## Disclaimer

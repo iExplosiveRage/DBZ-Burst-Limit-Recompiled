@@ -184,10 +184,12 @@ void BurstLimitOnlineSetup() {
   // The input delay and the per-frame input channel change what the driver
   // does with each frame, so they're shared the same way.
   // The Ki charge (burstlimit_kicharge.cpp) runs inside the battle, so its
-  // settings must match too, and both players load the same start forms.
+  // settings must match too, and both players load the same start forms. A
+  // Drama Piece (burstlimit_drama.cpp) changes the fight's timing: the host's
+  // drama_pieces is used by both.
   rex::net::online::SetSyncedCvars({"online_tick_sleep", "online_fast_tick", "online_input_delay",
                                     "online_input_channel", "ki_charge", "ki_charge_rate",
-                                    "start_forms"});
+                                    "start_forms", "drama_pieces"});
   BurstLimitNetInputSetup();
 }
 

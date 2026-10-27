@@ -6,17 +6,20 @@
 // stream (4-bit ADPCM), decoded here to 16-bit PCM in a WAV in memory and
 // played with PlaySound (one at a time, like the game's menu sounds).
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include <windows.h>
@@ -26,6 +29,7 @@
 #include <rex/logging.h>
 
 #include "burstlimit_cpk.h"
+#include "burstlimit_gamesound.h"
 
 #pragma comment(lib, "winmm.lib")
 
@@ -164,8 +168,9 @@ const UtfValue* Find(const std::vector<std::pair<std::string, UtfValue>>& row,
   return nullptr;
 }
 
-// A CRI ADX stream (type 3, 4-bit, unencrypted) to 16-bit PCM in a WAV.
-bool AdxToWav(const uint8_t* adx, size_t size, std::vector<uint8_t>& wav) {
+// A CRI ADX stream (type 3, 4-bit, unencrypted) to 16-bit PCM, interleaved.
+bool AdxDecode(const uint8_t* adx, size_t size, std::vector<int16_t>& pcm, uint32_t& rate_out,
+               uint32_t& channels_out) {
   if (size < 32 || adx[0] != 0x80 || adx[1] != 0 || adx[4] != 3 || adx[6] != 4) {
     return false;
   }
@@ -174,14 +179,14 @@ bool AdxToWav(const uint8_t* adx, size_t size, std::vector<uint8_t>& wav) {
   const uint32_t rate = Be32(adx + 8), total = Be32(adx + 12);
   const uint32_t highpass = Be16(adx + 16);
   if (!block || block < 3 || !channels || channels > 2 || !rate || data >= size ||
-      adx[19] != 0 /* encrypted */) {
+      adx[19] != 0 /* encrypted */ || total > rate * 120u) {
     return false;
   }
   const double a = std::sqrt(2.0) - std::cos(2.0 * 3.14159265358979 * highpass / rate);
   const double b = std::sqrt(2.0) - 1.0;
   const double c = (a - std::sqrt((a + b) * (a - b))) / b;
   const int coef1 = int(c * 8192.0), coef2 = int(-c * c * 4096.0);
-  std::vector<int16_t> pcm(size_t(total) * channels);
+  pcm.assign(size_t(total) * channels, 0);
   int hist[2][2] = {};
   size_t pos = data;
   for (uint32_t done = 0; done < total && pos + block * channels <= size;) {
@@ -198,11 +203,26 @@ bool AdxToWav(const uint8_t* adx, size_t size, std::vector<uint8_t>& wav) {
         sample = sample < -32768 ? -32768 : sample > 32767 ? 32767 : sample;
         h2 = h1;
         h1 = sample;
-        // A bit under the game's level: these play over its music.
-        pcm[size_t(done + i) * channels + ch] = int16_t(sample * 3 / 4);
+        pcm[size_t(done + i) * channels + ch] = int16_t(sample);
       }
     }
     done += per;
+  }
+  rate_out = rate;
+  channels_out = channels;
+  return true;
+}
+
+// The same to a WAV in memory (for PlaySound).
+bool AdxToWav(const uint8_t* adx, size_t size, std::vector<uint8_t>& wav) {
+  std::vector<int16_t> pcm;
+  uint32_t rate = 0, channels = 0;
+  if (!AdxDecode(adx, size, pcm, rate, channels)) {
+    return false;
+  }
+  // A bit under the game's level: these play over its music.
+  for (int16_t& v : pcm) {
+    v = int16_t(v * 3 / 4);
   }
   const uint32_t bytes = uint32_t(pcm.size() * 2);
   wav.resize(44 + bytes);
@@ -222,6 +242,149 @@ bool AdxToWav(const uint8_t* adx, size_t size, std::vector<uint8_t>& wav) {
   put32(40, bytes);
   std::memcpy(&wav[44], pcm.data(), bytes);
   return true;
+}
+
+// ---------------------------------------------------------------- whole cue sheets
+// For the achievement sound (achievement_sound = game): every cue of the
+// game's system, menu and battle SE cue sheets, kept as read (the CSB file
+// stays in memory, the cues point into it) and decoded when asked for.
+
+using Rows = std::vector<std::vector<std::pair<std::string, UtfValue>>>;
+
+struct CueLeaf {
+  const uint8_t* aax = nullptr;
+  size_t size = 0;
+  uint32_t delay_ms = 0;
+  float volume = 1.0f;
+};
+
+struct CueInfo {
+  uint32_t id = 0;
+  std::string name;
+  float seconds = 0.0f;
+  float volume = 1.0f;
+  std::vector<CueLeaf> leaves;
+};
+
+struct Bank {
+  const char* name;
+  std::vector<uint8_t> csb;
+  std::vector<CueInfo> cues;
+};
+
+std::array<Bank, 3> g_banks = {{{"SYSTEM_SE", {}, {}}, {"MENU_SE", {}, {}}, {"BATTLE_COMMON_SE", {}, {}}}};
+std::atomic<bool> g_banks_loaded{false};
+
+std::string Text(const std::vector<std::pair<std::string, UtfValue>>& row, std::string_view key) {
+  const UtfValue* v = Find(row, key);
+  return v ? v->text : std::string();
+}
+uint64_t Number(const std::vector<std::pair<std::string, UtfValue>>& row, std::string_view key) {
+  const UtfValue* v = Find(row, key);
+  return v ? v->number : 0;
+}
+
+// The ADX stream of a SOUND_ELEMENT's AAX table (its first segment).
+bool AaxAdx(const uint8_t* aax, size_t size, const uint8_t*& adx, size_t& adx_size) {
+  if (size >= 4 && aax[0] == 0x80) {
+    adx = aax;
+    adx_size = size;
+    return true;
+  }
+  Rows rows;
+  if (!ReadUtf(aax, size, rows) || rows.empty()) return false;
+  const UtfValue* d = Find(rows[0], "data");
+  if (!d || !d->data) return false;
+  adx = d->data;
+  adx_size = d->size;
+  return true;
+}
+
+void ParseBank(Bank& bank) {
+  Rows tables, cue_rows, synth_rows, element_rows;
+  if (!ReadUtf(bank.csb.data(), bank.csb.size(), tables)) return;
+  for (const auto& row : tables) {
+    const UtfValue* table = Find(row, "utf");
+    if (!table || !table->data) continue;
+    const std::string name = Text(row, "name");
+    if (name == "CUE") ReadUtf(table->data, table->size, cue_rows);
+    if (name == "SYNTH") ReadUtf(table->data, table->size, synth_rows);
+    if (name == "SOUND_ELEMENT") ReadUtf(table->data, table->size, element_rows);
+  }
+  std::unordered_map<std::string, size_t> synths, elements;
+  for (size_t i = 0; i < synth_rows.size(); ++i) synths[Text(synth_rows[i], "synname")] = i;
+  for (size_t i = 0; i < element_rows.size(); ++i) elements[Text(element_rows[i], "name")] = i;
+  // A synth to its waveform leaves (track synths list their children, one a line).
+  std::function<void(const std::string&, int, std::vector<std::pair<size_t, size_t>>&)> collect =
+      [&](const std::string& name, int depth, std::vector<std::pair<size_t, size_t>>& out) {
+        auto it = synths.find(name);
+        if (it == synths.end() || depth > 8) return;
+        const auto& row = synth_rows[it->second];
+        const std::string link = Text(row, "lnkname");
+        if (Number(row, "syntype") == 0) {
+          auto e = elements.find(link);
+          if (e != elements.end() && link.find("silent") == std::string::npos) {
+            out.emplace_back(it->second, e->second);
+          }
+          return;
+        }
+        size_t start = 0;
+        while (start < link.size()) {
+          size_t end = link.find('\n', start);
+          if (end == std::string::npos) end = link.size();
+          if (end > start) collect(link.substr(start, end - start), depth + 1, out);
+          start = end + 1;
+        }
+      };
+  for (const auto& cue : cue_rows) {
+    const std::string synth = Text(cue, "synth");
+    auto top = synths.find(synth);
+    if (top == synths.end()) continue;
+    std::vector<std::pair<size_t, size_t>> leaves;
+    collect(synth, 0, leaves);
+    if (leaves.empty()) continue;
+    const auto& top_row = synth_rows[top->second];
+    if (Number(top_row, "cmplxtype") == 1) leaves.resize(1);  // random: the first variant
+    CueInfo info;
+    info.id = uint32_t(Number(cue, "id"));
+    info.volume = float(Number(top_row, "volume")) / 1000.0f;
+    std::string label = Text(element_rows[leaves[0].second], "name");
+    label = label.substr(label.rfind('/') + 1);
+    for (const char* suffix : {"_aif", "_wav"}) {
+      if (label.size() > 4 && label.compare(label.size() - 4, 4, suffix) == 0) label.resize(label.size() - 4);
+    }
+    info.name = label;
+    for (const auto& [s, e] : leaves) {
+      const UtfValue* d = Find(element_rows[e], "data");
+      const uint8_t* adx = nullptr;
+      size_t adx_size = 0;
+      if (!d || !d->data || !AaxAdx(d->data, d->size, adx, adx_size) || adx_size < 16) continue;
+      CueLeaf leaf;
+      leaf.aax = d->data;
+      leaf.size = d->size;
+      leaf.delay_ms = uint32_t(Number(synth_rows[s], "dlytim"));
+      leaf.volume = float(Number(synth_rows[s], "volume")) / 1000.0f;
+      const uint32_t rate = Be32(adx + 8), total = Be32(adx + 12);
+      if (rate) info.seconds = std::max(info.seconds, leaf.delay_ms / 1000.0f + float(total) / rate);
+      info.leaves.push_back(leaf);
+    }
+    if (!info.leaves.empty()) bank.cues.push_back(std::move(info));
+  }
+  std::sort(bank.cues.begin(), bank.cues.end(),
+            [](const CueInfo& a, const CueInfo& b) { return a.id < b.id; });
+}
+
+void LoadBanks(const std::filesystem::path& game_data_root) {
+  size_t cues = 0;
+  for (Bank& bank : g_banks) {
+    const std::string file = std::string("SOUND/CSB/CMN/") + bank.name + ".CSB";
+    if (BurstLimitReadGameFile(game_data_root, file, bank.csb)) {
+      ParseBank(bank);
+      cues += bank.cues.size();
+    }
+  }
+  g_banks_loaded.store(true);
+  REXLOG_INFO("Game sounds: {} cues read from the game's SE cue sheets", cues);
 }
 
 void Load(std::filesystem::path game_data_root) {
@@ -263,6 +426,7 @@ void Load(std::filesystem::path game_data_root) {
   }
   g_loaded.store(true);
   REXLOG_INFO("Menu sounds: {} of {} read from the game", found, kSoundNames.size());
+  LoadBanks(game_data_root);
 }
 
 }  // namespace
@@ -290,4 +454,69 @@ void BurstLimitPlayMenuSound(int sound) {
                                    SND_MEMORY | SND_ASYNC | SND_NODEFAULT);
     REXLOG_DEBUG("Menu sounds: {} {}", kSoundNames[size_t(sound)], played ? "played" : "failed");
   }
+}
+
+// ---------------------------------------------------------------- achievement_sound = game
+
+std::vector<BurstLimitGameCue> BurstLimitListGameCues() {
+  std::vector<BurstLimitGameCue> out;
+  if (!g_banks_loaded.load()) return out;
+  for (const Bank& bank : g_banks) {
+    for (const CueInfo& cue : bank.cues) {
+      out.push_back({bank.name, cue.id, cue.name, cue.seconds});
+    }
+  }
+  return out;
+}
+
+bool BurstLimitDecodeGameCue(std::string_view key, std::vector<float>& mono, uint32_t& rate,
+                             std::string& what) {
+  const size_t colon = key.find(':');
+  if (colon == std::string_view::npos) {
+    what = "achievement_game_sound should be BANK:cue, like SYSTEM_SE:17";
+    return false;
+  }
+  if (!g_banks_loaded.load()) {
+    what = "the game's sounds aren't read yet";
+    return false;
+  }
+  const std::string_view bank_name = key.substr(0, colon);
+  const uint32_t id = uint32_t(std::strtoul(std::string(key.substr(colon + 1)).c_str(), nullptr, 10));
+  for (const Bank& bank : g_banks) {
+    if (bank_name != bank.name) continue;
+    for (const CueInfo& cue : bank.cues) {
+      if (cue.id != id) continue;
+      mono.clear();
+      rate = 0;
+      for (const CueLeaf& leaf : cue.leaves) {
+        const uint8_t* adx = nullptr;
+        size_t adx_size = 0;
+        std::vector<int16_t> pcm;
+        uint32_t r = 0, ch = 0;
+        if (!AaxAdx(leaf.aax, leaf.size, adx, adx_size) || !AdxDecode(adx, adx_size, pcm, r, ch)) continue;
+        if (!rate) rate = r;
+        if (r != rate) continue;
+        const size_t at = size_t(uint64_t(leaf.delay_ms) * rate / 1000), frames = pcm.size() / ch;
+        if (mono.size() < at + frames) mono.resize(at + frames, 0.0f);
+        for (size_t i = 0; i < frames; ++i) {
+          float v = 0.0f;
+          for (uint32_t c = 0; c < ch; ++c) v += pcm[i * ch + c];
+          mono[at + i] += v / float(ch) / 32768.0f * leaf.volume * cue.volume;
+        }
+      }
+      if (mono.empty()) {
+        what = std::string(key) + ": can't decode it";
+        return false;
+      }
+      float peak = 0.0f;
+      for (float v : mono) peak = std::max(peak, std::abs(v));
+      if (peak > 1.0f) {
+        for (float& v : mono) v /= peak;
+      }
+      what = std::string(bank.name) + ":" + std::to_string(cue.id) + " " + cue.name;
+      return true;
+    }
+  }
+  what = std::string(key) + ": no such cue in SYSTEM_SE, MENU_SE or BATTLE_COMMON_SE";
+  return false;
 }

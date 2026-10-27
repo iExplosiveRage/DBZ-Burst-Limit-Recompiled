@@ -657,6 +657,13 @@ after_instruction = true
 address = 0x8217AEB4
 name = "BurstLimitOnlineRulesBattleSetup"
 
+# Drama sequences on / off (src/burstlimit_drama.cpp): right after it, still
+# before the battle set-up reads the match request: with drama_pieces off the
+# fight's Drama Piece slots are emptied.
+[[entrypoint.midasm_hook]]
+address = 0x8217AEB8
+name = "BurstLimitDramaBattleSetup"
+
 # sub_8226D250 draws the Session Lobby's Battle Rules (View Battle Rules) from
 # r4 = r31: +20 rounds - 1, +21 time limit index, +22 Drama Pieces: the agreed
 # room rules there (both PCs).

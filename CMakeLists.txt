@@ -18,6 +18,7 @@ include(generated/rexglue.cmake)
 
 set(BURSTLIMIT_SOURCES
     src/main.cpp
+    src/burstlimit_achievements.cpp
     src/burstlimit_branding.cpp
     src/burstlimit_buttons.cpp
     src/burstlimit_camera.cpp
@@ -27,6 +28,8 @@ set(BURSTLIMIT_SOURCES
     src/burstlimit_kicharge.cpp
     src/burstlimit_launcher.cpp
     src/burstlimit_discord.cpp
+    src/burstlimit_drama.cpp
+    src/burstlimit_exit.cpp
     src/burstlimit_menuart.cpp
     src/burstlimit_menusound.cpp
     src/burstlimit_mods.cpp
@@ -108,3 +111,20 @@ if(WIN32)
     target_link_libraries(burstlimit PRIVATE shell32)
 endif()
 target_include_directories(burstlimit PRIVATE "${CMAKE_BINARY_DIR}/rexglue-sdk/include")
+
+# The default achievement sounds (achievement_sound = "tiers"; trophy sounds by
+# Spade, free): sounds\trophy_*.mp3 next to the exe, their credit in licenses\.
+set(BURSTLIMIT_TROPHY_SOUNDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/res/sounds/trophy_bronze.mp3"
+    "${CMAKE_CURRENT_SOURCE_DIR}/res/sounds/trophy_silver.mp3"
+    "${CMAKE_CURRENT_SOURCE_DIR}/res/sounds/trophy_gold.mp3"
+    "${CMAKE_CURRENT_SOURCE_DIR}/res/sounds/trophy_platinum.mp3")
+add_custom_command(TARGET burstlimit POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:burstlimit>/sounds"
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different ${BURSTLIMIT_TROPHY_SOUNDS}
+            "$<TARGET_FILE_DIR:burstlimit>/sounds"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:burstlimit>/licenses"
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "${CMAKE_CURRENT_SOURCE_DIR}/res/sounds/CREDITS.txt"
+            "$<TARGET_FILE_DIR:burstlimit>/licenses/trophy-sounds-CREDITS.txt"
+    VERBATIM)

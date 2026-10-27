@@ -1,0 +1,11 @@
+Trophy sounds by Spade (free).
+
+sounds\trophy_bronze.mp3, trophy_silver.mp3, trophy_gold.mp3 and trophy_platinum.mp3 are the
+default achievement sounds of Dragon Ball Z: Burst Limit Recompiled (achievement_sound = "tiers":
+one sound per trophy tier - bronze, silver, gold - and the platinum one when every achievement is
+unlocked). They were made by Spade, who shares them for free, and are included with this credit.
+Changes: levels raised, converted to 48 kHz MP3.
+
+To use other sounds, point achievement_sound_bronze / _silver / _gold / _platinum in
+burstlimit.toml at your own .wav or .mp3 files. An empty or missing file falls back to a chime made
+by the recomp.
