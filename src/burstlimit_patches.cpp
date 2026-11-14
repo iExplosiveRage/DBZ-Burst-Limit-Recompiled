@@ -942,3 +942,34 @@ extern "C" REX_FUNC(sub_820F6908) {
   }
   __imp__sub_820F6908(ctx, base);
 }
+
+// The same race on the render loop thread (rollback3 long online sessions, right after a match's results): five draw
+// functions look a handle up in the handle map 0x8438D900 (sub_820F37F8) and call through the result without a NULL
+// check - sub_820EDB40 / sub_820EDCF0 (handle [r4 + 16]), sub_820EE760 ([r4 + 68]), sub_820EEAD0 / sub_820EEE68 (r6).
+// A released handle -> lookup 0 -> read of guest 0 (r108_long at 0x820EE824, r114_long at 0x820EDB6C). Such a draw
+// is skipped: it would only draw an object that is gone.
+REX_EXTERN(sub_820F37F8);
+static std::atomic<uint32_t> g_dead_handle_draws{0};
+static bool DrawHandleLive(PPCContext& ctx, uint8_t* base, uint32_t handle, uint32_t fn) {
+  const PPCContext saved = ctx;
+  ctx.r3.u64 = 0x8438D900u;
+  ctx.r4.u64 = handle;
+  sub_820F37F8(ctx, base);
+  const uint32_t object = ctx.r3.u32;
+  ctx = saved;
+  if (object) return true;
+  const uint32_t count = ++g_dead_handle_draws;
+  if (count <= 8 || (count & (count - 1)) == 0) {
+    REXLOG_WARN("Draw of handle {:08X} skipped: it was released (sub_{:08X}, {})", handle, fn, count);
+  }
+  return false;
+}
+static uint32_t HandleAt(uint8_t* base, uint32_t item, uint32_t offset) {
+  return item >= 0x10000 ? rex::memory::load_and_swap<uint32_t>(base + item + offset) : 0xFFFFFFFFu;
+}
+#define BL_DRAW_GUARD(addr, handle_expr)                                                REX_EXTERN(__imp__sub_##addr);                                                        extern "C" REX_FUNC(sub_##addr) {                                                       if (!DrawHandleLive(ctx, base, (handle_expr), 0x##addr)) return;                      __imp__sub_##addr(ctx, base);                                                       }
+BL_DRAW_GUARD(820EDB40, HandleAt(base, ctx.r4.u32, 16))
+BL_DRAW_GUARD(820EDCF0, HandleAt(base, ctx.r4.u32, 16))
+BL_DRAW_GUARD(820EE760, HandleAt(base, ctx.r4.u32, 68))
+BL_DRAW_GUARD(820EEAD0, ctx.r6.u32)
+BL_DRAW_GUARD(820EEE68, ctx.r6.u32)

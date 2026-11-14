@@ -78,6 +78,10 @@ struct StallCounter {
   // Window for the periodic line.
   uint64_t window_ticks = 0, window_held = 0, window_holds = 0;
   int64_t window_start_ms = 0;
+  // per battle phase (0x841B5228: 0 intro, 1 READY?, 2 fight, 3 round end, 11, 4 round change, 5 post-round,
+  // 13 results): ticks / held ticks / longest hold, for the match-total line
+  uint64_t phase_ticks[16] = {}, phase_held[16] = {};
+  uint32_t phase_longest[16] = {};
 } g_stalls;
 
 void FlushStalls(const char* why) {
@@ -91,6 +95,13 @@ void FlushStalls(const char* why) {
       "delay={}",
       why, s.ticks, s.held, s.ticks ? 100.0 * double(s.held) / double(s.ticks) : 0.0, s.holds,
       s.longest, delay ? std::to_string(delay) + "f" : std::string("game"));
+  std::string by_phase;
+  for (int p = 0; p < 16; ++p) {
+    if (!s.phase_ticks[p]) continue;
+    by_phase += fmt::format(" | {}: {}/{} ({:.1f}%) longest {}", p, s.phase_held[p], s.phase_ticks[p],
+                            100.0 * double(s.phase_held[p]) / double(s.phase_ticks[p]), s.phase_longest[p]);
+  }
+  if (!by_phase.empty()) REXLOG_WARN("[OnlineStalls] held by battle phase (held/ticks){}", by_phase);
   s = StallCounter{};
   BurstLimitNetInputMatchEnd(why);
 }
@@ -101,6 +112,28 @@ std::mutex g_game_notice_mutex;
 std::string g_game_notice;
 std::chrono::steady_clock::time_point g_game_notice_at;
 double g_game_notice_seconds = 0.0;
+
+// The input delay line (changing it during a match), under the notices.
+std::mutex g_delay_notice_mutex;
+std::string g_delay_notice;
+std::chrono::steady_clock::time_point g_delay_notice_at;
+double g_delay_notice_seconds = 0.0;
+
+bool GetDelayNotice(rex::net::online::Notice* out) {
+  std::lock_guard<std::mutex> lock(g_delay_notice_mutex);
+  if (g_delay_notice.empty()) {
+    return false;
+  }
+  const double age =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - g_delay_notice_at).count();
+  if (age >= g_delay_notice_seconds) {
+    return false;
+  }
+  out->text = g_delay_notice;
+  out->age_seconds = age;
+  out->duration_seconds = g_delay_notice_seconds;
+  return true;
+}
 
 bool GetGameNotice(rex::net::online::Notice* out) {
   std::lock_guard<std::mutex> lock(g_game_notice_mutex);
@@ -125,10 +158,18 @@ class OnlineNotice final : public rex::ui::ImGuiDialog {
  protected:
   void OnDraw(ImGuiIO& io) override {
     rex::net::online::Notice notice;
-    if ((!rex::net::online::GetNotice(&notice) || notice.text.empty()) &&
-        (!GetGameNotice(&notice) || notice.text.empty())) {
-      return;
+    if ((rex::net::online::GetNotice(&notice) && !notice.text.empty()) ||
+        (GetGameNotice(&notice) && !notice.text.empty())) {
+      DrawNotice(io, notice, 0.06f);
     }
+    rex::net::online::Notice delay;
+    if (GetDelayNotice(&delay) && !delay.text.empty()) {
+      DrawNotice(io, delay, 0.215f);
+    }
+  }
+
+ private:
+  void DrawNotice(ImGuiIO& io, const rex::net::online::Notice& notice, float top) {
     // ImGui is linked into both the runtime and this exe; draw in the
     // runtime's context.
     ImGui::SetCurrentContext(io.Ctx);
@@ -146,7 +187,7 @@ class OnlineNotice final : public rex::ui::ImGuiDialog {
     const float lines = text_size.x > wrap ? std::ceil(text_size.x / wrap) : 1.0f;
     const float height = text_size.y * lines;
     const float pad = size * 0.5f;
-    const ImVec2 position((io.DisplaySize.x - width) * 0.5f, io.DisplaySize.y * 0.06f);
+    const ImVec2 position((io.DisplaySize.x - width) * 0.5f, io.DisplaySize.y * top);
     ImDrawList* draw_list = ImGui::GetForegroundDrawList();
     draw_list->AddRectFilled(ImVec2(position.x - pad, position.y - pad * 0.6f),
                              ImVec2(position.x + width + pad, position.y + height + pad * 0.6f),
@@ -189,7 +230,8 @@ void BurstLimitOnlineSetup() {
   // drama_pieces is used by both.
   rex::net::online::SetSyncedCvars({"online_tick_sleep", "online_fast_tick", "online_input_delay",
                                     "online_input_channel", "ki_charge", "ki_charge_rate",
-                                    "start_forms", "drama_pieces"});
+                                    "start_forms", "drama_pieces", "online_netcode",
+                                    "online_rollback_phase_delay"});
   BurstLimitNetInputSetup();
 }
 
@@ -198,6 +240,13 @@ void BurstLimitOnlineSetup() {
 // menu finds it ready (issue #22). Nothing in the LAN / VPN mode.
 void BurstLimitOnlineConnectEarly() {
   rex::net::online::ConnectLobbyEarly();
+}
+
+void BurstLimitOnlineDelayNotice(const std::string& text, double seconds) {
+  std::lock_guard<std::mutex> lock(g_delay_notice_mutex);
+  g_delay_notice = text;
+  g_delay_notice_at = std::chrono::steady_clock::now();
+  g_delay_notice_seconds = seconds;
 }
 
 void BurstLimitOnlineGameNotice(const std::string& text, double seconds) {
@@ -245,7 +294,11 @@ void BurstLimitOnlineFrame(rex::memory::Memory* memory) {
   }
   ++s.ticks;
   ++s.window_ticks;
+  const uint32_t phase = LoadU32(memory, 0x841B5228) & 15u;
+  ++s.phase_ticks[phase];
   if (held) {
+    ++s.phase_held[phase];
+    s.phase_longest[phase] = std::max(s.phase_longest[phase], s.run + 1);
     ++s.held;
     ++s.window_held;
     if (++s.run == 1) {

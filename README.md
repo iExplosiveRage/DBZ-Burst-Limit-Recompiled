@@ -186,6 +186,11 @@ normal Windows program instead of inside an emulator.
   with, so a second controller or a virtual pad (Steam Input, DS4Windows) in the first slot no longer blocks
   online with "You must sign in". The lobby connects as soon as the game starts, so the online menus find it
   ready.
+- **Rollback netcode** (since 0.8.0, **beta**): online fights run on your own input right away, guess the other
+  player's, and when their real input arrives with a different press, the game rewinds the last frames and plays
+  them again with it - no waiting for the ping in the fight. Both PCs stay frame-for-frame identical (checked
+  every frame). Player Match hosts can pick **Netcode: Rollback / Classic** in the Room Rules; Quick Match and
+  Ranked use Rollback. See [Rollback netcode](#rollback-netcode-beta---since-080).
 - **Smooth online fights** (`online_input_delay`): every frame's input is sent right away over a side channel
   and both PCs run it a fixed number of frames later (2-8, the host's choice), instead of the game's 3-frame
   packs - no slow motion while the ping stays under the delay. The guest takes the host's online settings, every
@@ -275,6 +280,7 @@ version - please attach it to an issue.
 | [CMake](https://cmake.org/download/) | 3.25 or newer | |
 | [Ninja](https://github.com/ninja-build/ninja/releases) | 1.11 or newer | Must be on `PATH`. |
 | [Git](https://git-scm.com/) | any recent | Needed for the SDK submodule. |
+| [Python](https://www.python.org/downloads/) | 3 (tested with 3.10) | Patches the recompiled code for rollback (`python` or `py` on `PATH`). |
 
 About 15 GB of free disk space is needed for the SDK dependencies and build output. A full first build takes
 10–30 minutes depending on your CPU.
@@ -352,16 +358,22 @@ build.bat
 2. Fix the symlinks inside the SDK's `libmspack` submodule (Git for Windows checks them out as text files).
 3. Configure with the `win-amd64-relwithdebinfo` CMake preset.
 4. Run the recompiler (generates `generated/default/*.cpp` from `default.xex`).
-5. Build `out\build\win-amd64-relwithdebinfo\burstlimit.exe`.
+5. Add the rollback write tracking to the recompiled code (`scripts\rollback\patch_generated.py`, needs Python 3;
+   without it the build works but rollback matches desync).
+6. Build `out\build\win-amd64-relwithdebinfo\burstlimit.exe`.
 
 To build manually instead:
 
 ```bat
 cmake --preset win-amd64-relwithdebinfo
 cmake --build out\build\win-amd64-relwithdebinfo --target burstlimit_codegen
+python -I scripts\rollback\patch_generated.py generated\default
 cmake out\build\win-amd64-relwithdebinfo
 cmake --build out\build\win-amd64-relwithdebinfo --target burstlimit
 ```
+
+The patch is idempotent; run it again whenever the recompiler has re-run (`generated\default\burstlimit_pch.h`
+contains `rb2 write tracking` once it's applied).
 
 Other presets: `win-amd64-debug`, `win-amd64-release`.
 
@@ -525,6 +537,7 @@ settings menu (F1). Any setting can also be passed on the command line, e.g. `--
 | `online_connect_wait_ms` | `6000` | How long a search or Create Match waits for a lobby connection that is still being made. |
 | `online_frame_rate_cap` | `true` | Online sessions run at 60 FPS whatever `frame_rate` is (both players the same speed). |
 | `online_input_delay` | `4` | Lobby matches: input delay in frames (`2`-`8`), or `off` for the game's own timing (`online_tick_sleep`). The host's value is used by both players. |
+| `online_live_delay` | `true` | Lobby matches: either player can change the input delay for both during the match (Back + D-pad up / down, or F6 / F5; `bind_online_delay_up`, `bind_online_delay_down`). Off on either PC = it stays as picked. |
 | `online_rules_host_health/attack/defense`, `online_rules_guest_health/attack/defense`, `online_rules_cutscenes` | `3` / `room` | Player Match rooms you host: the room rules you picked last (Health 1-8 bars, Attack and Defense 1-5, cut-scenes `room` / `on` / `off`), the menu's defaults for the next guest. |
 | `online_input_channel` | `true` | Lobby matches: send every frame's input right away (off = only the game's own 3-frame packs). |
 | `online_desync_check` | `true` | Lobby matches: compare the fight's state with the other PC every frame and log the first difference (`[OnlineDesync]`). |
@@ -580,11 +593,15 @@ takes the host's online settings (`online_input_delay`, `online_input_channel`, 
 `online_fast_tick`) for the session, and they can't change until it ends.
 
 **Input delay** (`online_input_delay`, F1 -> GAME -> Online input delay): in lobby matches each player's input
-is sent every frame, and both PCs run it a fixed number of frames later (the host's choice, 4 by default).
-The fight only waits for the other player when the ping is higher than the delay covers - one frame is
-16.7 ms: about 2 frames per 25 ms of one-way ping plus a frame of margin. Rough guide: **2** for a very low
-ping, **3-4** normal, **6-8** high ping. `Game default` (`off`) keeps the game's own timing
-(`online_tick_sleep`); the **Online input speed** item for it is only shown then.
+is sent every frame, and both PCs run it a few frames later (the host's choice). **Auto** (the default since
+0.8.0) picks it from the ping when the match starts: with rollback, 2 frames in the fight (more only at a very
+high ping) and the ping's delay outside the fight; with Classic, the ping's delay. A fixed value (2-8) is used
+as is: with Classic the fight only waits for the other player when the ping is higher than the delay covers -
+one frame is 16.7 ms: about 2 frames per 25 ms of one-way ping plus a frame of margin. Rough guide: **2** for a
+very low ping, **3-4** normal, **6-8** high ping. `Game default` (`off`) keeps the game's own timing
+(`online_tick_sleep`, no rollback); the **Online input speed** item for it is only shown then.
+
+**Changing the delay during a match** (`online_live_delay`, Classic lobby matches): either player presses **Back + D-pad up / down** or **F6 / F5** (2 to 8 frames). A line on screen shows the delay on both PCs, both switch on the same frame about a quarter of a second later, and the fight stays in sync. Raising it by N holds the last input for N frames; lowering it plays N frames in one, keeping the buttons pressed in them. Holding Back shows the current delay and ping. Each new match starts at the room's delay again. Rollback matches, Radmin / LAN matches and `online_input_delay = "off"` don't have it.
 
 If something goes wrong online, the log (`burstlimit.log` next to the exe with the release `burstlimit.toml`)
 has the connection (`[Lobby]`, `[ICE]`, `[OnlineLink]`), the waits (`[OnlineStalls]`) and any desync
@@ -600,6 +617,28 @@ own `build<timestamp>` id. The override is a CMake cache value: pass it empty ag
 The lobby server is a Cloudflare Worker (WebSocket room list, signaling and TURN credentials); it only lists
 rooms and helps the PCs find each other - the match itself is peer-to-peer.
 
+### Rollback netcode (beta) - since 0.8.0
+**This is new and still a beta: please report problems** (see below). In lobby matches the fight no longer waits
+for the other player's input: each PC plays its own input right away (with the small Auto delay above), guesses
+the other player's from their last one, and when the real input arrives and differs, the game goes back to that
+frame, restores the fight's state and plays the frames again with it before the next picture is shown. You
+may see a short jump of the other fighter at a high ping; your own inputs always come out on time.
+
+- **Who uses it:** Player Match rooms use the host's **Netcode** room rule (Rollback by default, below); Quick
+  Match and Ranked Match always use Rollback. Both players need the same version.
+- **Outside the fight** (intros, READY?, the KO / time-up scenes, round changes, results) the match runs with the
+  ping's input delay instead of rolling back, so cut-scenes and sounds play once and in sync.
+- **Desync check:** both PCs compare the fight's state every frame. If they ever differ (a bug), rollback stops
+  for the rest of that match and the match ends on both PCs with a notice, instead of going on out of sync.
+- **Tested** with two copies on one PC through simulated network conditions: 30-120 ms ping, jitter, lost and
+  late packets, 5 matches in a row, supers and transformations - the fight's state stayed the same on both PCs. **It hasn't been tested between two houses yet**, which is what this beta is for.
+- **If something goes wrong:** host a Player Match room and pick **Netcode: Classic** in the Room Rules - the
+  online of 0.7.x (lockstep with input delay, Back + D-pad changes it during the match). Please open an issue with
+  both players' `burstlimit.log` (next to the exe), the ping and the characters (the rollback lines are
+  `[OnlineRollback]` / `[OnlineDesync]`).
+- Rollback costs some CPU in online fights (a rewind replays up to a few frames at once); offline, the code that
+  makes it possible costs a few percent.
+
 ### Room rules (Player Match) - since 0.6.0
 When a guest joins your Player Match room, you (the host) get a **Room Rules** menu: each player's **Health**
 (1-8 bars), **Attack** and **Defense** (1-5, 3 = normal), the **Time Limit**, the **Rounds** and the
@@ -608,6 +647,10 @@ the host's menu closes once the guest's game has them, so both PCs always fight 
 for Fight Again). The time and rounds start from the ones you picked in Create Match, and your choice is shown
 in the room list and in **View Battle Rules**. Your last choice is the default next time (`online_rules_*`).
 Ranked Match and the older Radmin VPN / LAN way keep the game's rules and show no menu. Both players need 0.6.0.
+
+Since 0.8.0 the menu has a **Netcode** row: **Rollback** (the default) or **Classic** (the lockstep online of
+0.7.x, with the live input delay). It's the host's choice for both players, the guest sees it in the rules box,
+and the host's last pick is kept (`online_rules_netcode`).
 
 ### Ranked Match and leaderboards - since 0.5.0
 - **Ranked:** Versus -> Online Battle -> **Ranked Match**: one player creates a match, the other searches (Quick
@@ -682,6 +725,11 @@ mods/
 
 ## Known issues
 
+- **Rollback netcode is a beta (0.8.0)**: it has only been tested with two copies on one PC through simulated
+  ping, jitter and packet loss, not between two houses yet. If a match desyncs it ends with a notice; if rollback
+  gives you trouble, pick **Netcode: Classic** in the Player Match Room Rules and please report it with both
+  logs. The Room Rules menu only opens when a guest joins, so to switch the netcode between matches the guest
+  leaves and joins again.
 - The lobby online is new (0.4.0): it was tested between two houses (4-6 ms ping, 15,000 desync checks without
   a difference), but some networks may still fail to connect, and desyncs are possible. Online through Wine /
   Proton hasn't been tested.

@@ -28,6 +28,7 @@
 
 // burstlimit_online.cpp: online stall counter, every game tick.
 void BurstLimitOnlineFrame(rex::memory::Memory* memory);
+void BurstLimitRb2Frame(rex::memory::Memory* memory);
 // burstlimit_buttons.cpp: the button icons follow the setting / controller.
 void BurstLimitButtonsFrame(rex::memory::Memory* memory);
 
@@ -575,6 +576,7 @@ void BurstLimitCameraFrame(PPCRegister& r30) {
     }
   }
   BurstLimitOnlineFrame(memory);
+  BurstLimitRb2Frame(memory);
   BurstLimitButtonsFrame(memory);
   // After the update, so it shows a pose free_camera_pose has just posted.
   if (g_where_requested.exchange(false)) {

@@ -87,6 +87,8 @@ REX_EXTERN(sub_821500D0);  // an aura effect object's destroy callback
 REX_EXTERN(sub_821499A8);  // ground effects (player, kind 0-16, &position, 0)
 REX_EXTERN(sub_82148EF0);  // stop ground effects (player, which: -1 = all)
 
+void BurstLimitRb2NoteHostStore(uint32_t a, uint32_t n);  // burstlimit_rb2.cpp
+
 namespace {
 
 constexpr uint32_t kFighterBanks = 1184;
@@ -215,6 +217,7 @@ T Load(rex::memory::Memory* memory, uint32_t address) {
 template <typename T>
 void Store(rex::memory::Memory* memory, uint32_t address, T value) {
   rex::memory::store_and_swap<T>(memory->TranslateVirtual<uint8_t*>(address), value);
+  BurstLimitRb2NoteHostStore(address, uint32_t(sizeof(T)));  // fighter state: a rollback rewind puts it back
 }
 
 Look CurrentLook() {
@@ -598,16 +601,20 @@ bool ActionDone(rex::memory::Memory* memory, uint32_t fighter, float step) {
 
 }  // namespace
 
+// burstlimit_netinput.cpp: Back + D-pad changes the online delay.
+void BurstLimitOnlineDelayMaskInput(rex::memory::Memory* memory, uint32_t input);
+
 // Mid-asm hook at 0x82172340 in sub_821721D8 (the local input task, after
 // the controller's command word at r31+64 got its pad and direction bits and
 // only when input isn't locked): L3 held (without R3) -> bit 31.
 void BurstLimitKiChargeInput(PPCRegister& r31) {
-  if (!REXCVAR_GET(ki_charge)) {
-    return;
-  }
   auto* memory = Memory();
   const uint32_t input = r31.u32;
   if (!memory || !Readable(memory, input + 64, 16)) {
+    return;
+  }
+  BurstLimitOnlineDelayMaskInput(memory, input);
+  if (!REXCVAR_GET(ki_charge)) {
     return;
   }
   const int32_t slot = Load<int32_t>(memory, input + 76);

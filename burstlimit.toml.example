@@ -40,9 +40,15 @@ present_vsync = true
 online_lobby_url = "wss://burstlimit-lobby.azoxrag2.workers.dev/v1/ws"
 # Your name in online rooms (max 15 characters, printable ASCII). Empty = your Windows user name.
 online_name = ""
-# Lobby matches: input delay in frames, 2 = very low ping, 3-4 = normal, 6-8 = high ping.
+# Lobby matches: input delay in frames. "auto" = from the ping (rollback: 2 in the fight),
+# or a fixed 2-8 (2 = very low ping, 3-4 = normal, 6-8 = high ping).
 # The host's value is used by both players. "off" = the game's own timing (online_tick_sleep).
-online_input_delay = "4"
+online_input_delay = "auto"
+# Classic netcode: either player can change the delay during a lobby match: Back + D-pad up / down,
+# or F6 / F5. false on either PC = it stays as picked.
+online_live_delay = true
+# Player Match rooms you host: the Room Rules' Netcode, "rollback" (beta) or "classic" (lockstep).
+online_rules_netcode = "rollback"
 
 # Game patches (see README).
 # Offline fights: "reduced" = no input delay, "original" = the game's own 3 frames (50 ms).

@@ -85,6 +85,9 @@ std::unique_ptr<rex::ui::ImGuiDialog> BurstLimitCreateInstaller(
 std::unique_ptr<rex::ui::AchievementNotificationDialog> BurstLimitCreateAchievementToast(
     rex::ui::ImGuiDrawer* drawer, rex::ui::ImmediateDrawer* immediate_drawer);
 void BurstLimitAchievementsMenu(rex::ui::QuickMenuSection& section);
+// burstlimit_netinput.cpp: F5 / F6 in an online match.
+void BurstLimitOnlineDelayStep(int step);
+
 // The F7 achievements window in the popup's style (it has the controllers
 // while open), and F7 / its debug command opening or closing it.
 std::unique_ptr<rex::ui::ImGuiDialog> BurstLimitCreateAchievementsWindow(
@@ -159,6 +162,12 @@ class BurstlimitApp : public rex::ReXApp {
       rex::cvar::SetFlagByName(
           "freeze_game", rex::cvar::Query<bool>("freeze_game") ? "false" : "true");
     });
+    rex::ui::RegisterBind("bind_online_delay_down", "F5",
+                          "Online match: lower the input delay (both players)",
+                          [] { BurstLimitOnlineDelayStep(-1); });
+    rex::ui::RegisterBind("bind_online_delay_up", "F6",
+                          "Online match: raise the input delay (both players)",
+                          [] { BurstLimitOnlineDelayStep(1); });
   }
 
   // Before the game's files are mounted (the mods change what the guest
@@ -782,9 +791,12 @@ class BurstlimitApp : public rex::ReXApp {
 
     rex::ui::QuickMenuSection& online_section = menu.sections.emplace_back();
     online_section.title = "ONLINE";
+    // The netcode is a Player Match room rule (Room Rules > Netcode, the host's choice for both players;
+    // burstlimit_online_rules.cpp); matches without room rules use rollback - no settings entry.
     online_section.items.push_back(choice(
         "Online input delay", "online_input_delay",
-        {{"2", "2 frames"},
+        {{"auto", "Auto (from the ping)"},
+         {"2", "2 frames"},
          {"3", "3 frames"},
          {"4", "4 frames"},
          {"5", "5 frames"},
@@ -795,6 +807,11 @@ class BurstlimitApp : public rex::ReXApp {
         "feels snappier; the fight only pauses when the ping is higher (2 frames ~ 25 ms one "
         "way, 4 ~ 55 ms, 6 ~ 90 ms, 8 ~ 120 ms). The host's choice is used by both players. "
         "Game default = the older Online input speed (Radmin / LAN)."));
+    online_section.items.push_back(toggle(
+        "Change delay in a match", "online_live_delay",
+        "In a Classic-netcode lobby match either player can change the input delay for both: "
+        "Back + D-pad up / down, or F6 / F5 on the keyboard (2 to 8 frames). Off on either PC = "
+        "it stays as picked. Each new match starts at the room's delay again."));
     Item& online = online_section.items.emplace_back(choice(
         "Online input speed", "online_tick_sleep",
         {{"0", "LAN"}, {"1", "Fast"}, {"2", "Normal"}, {"3", "Game default"}},

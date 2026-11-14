@@ -4,7 +4,9 @@
 // When a guest joins a Player Match room, the host gets a rules menu in the
 // look of those panels: each player's Health (1-8 bars, 1000 HP each), Attack
 // and Defense (1-5; 3 = normal), the time limit (60 / 90 / 120 / 180 /
-// infinite), the rounds (1-5) and the opening / ending cut-scenes. The guest
+// infinite), the rounds (1-5), the opening / ending cut-scenes and the
+// netcode (Rollback / Classic lockstep - burstlimit_netinput.cpp decides each
+// match's netcode from it when the match starts, on both PCs). The guest
 // sees "the host is choosing" and then the chosen rules. The host's choice
 // goes to the guest over the peer link (side-channel kind 18) and the host's
 // menu stays open until the guest acknowledges it, so the host can't get to a
@@ -16,7 +18,8 @@
 //
 // Messages (kind 18, body[0] = version 1, body[1] = type):
 //   1 REQUEST guest -> host: +2 u32 nonce (new per session), +6 name (16)
-//   2 RULES   host -> guest: +2 u32 nonce, +6 seq, +7 rules (kRulesBytes), +16 host name (16)
+//   2 RULES   host -> guest: +2 u32 nonce, +6 seq, +7 rules (kRulesBytes = 10, the last byte the
+//             netcode: 1 rollback, 0 classic), +17 host name (16)
 //   3 ACK     guest -> host: +2 u32 nonce, +6 seq
 //   4 MENU    host -> guest: +2 u32 nonce - the host's menu is open (every
 //             300 ms while it is; the guest's "choosing" panel shows only then)
@@ -80,7 +83,13 @@ REXCVAR_DEFINE_STRING(online_rules_cutscenes, "room", "Online",
                       "Player Match rooms you host: the opening / ending cut-scenes you last "
                       "picked")
     .allowed({"room", "on", "off"});
+REXCVAR_DEFINE_STRING(online_rules_netcode, "rollback", "Online",
+                      "Player Match rooms you host: the netcode you last picked (rollback / classic "
+                      "= the older lockstep online with live delay)")
+    .allowed({"rollback", "classic"});
 
+REXCVAR_DEFINE_INT32(online_rules_test_rounds, 0, "Debug",
+                     "Test: the host's rules menu starts with this many rounds (1-5) instead of the room's, 0 off");
 REXCVAR_DEFINE_BOOL(online_rules_test_ignore, false, "Debug",
                     "Test: the guest ignores the host's room rules (as if they never arrived)");
 
@@ -145,8 +154,9 @@ struct Rules {
   uint8_t time = 1;  // 0-3 = 60-180 s, 4 = infinite
   uint8_t rounds = 2;
   uint8_t cutscenes = 1;
+  uint8_t netcode = 1;  // 1 Rollback, 0 Classic (lockstep)
 };
-constexpr size_t kRulesBytes = 9;
+constexpr size_t kRulesBytes = 10;
 
 void PackRules(const Rules& r, uint8_t* out) {
   out[0] = r.health[0];
@@ -158,6 +168,7 @@ void PackRules(const Rules& r, uint8_t* out) {
   out[6] = r.time;
   out[7] = r.rounds;
   out[8] = r.cutscenes;
+  out[9] = r.netcode;
 }
 
 bool UnpackRules(const uint8_t* in, Rules* r) {
@@ -171,13 +182,14 @@ bool UnpackRules(const uint8_t* in, Rules* r) {
   v.time = in[6];
   v.rounds = in[7];
   v.cutscenes = in[8];
+  v.netcode = in[9];
   for (int p = 0; p < 2; ++p) {
     if (v.health[p] < 1 || v.health[p] > 8 || v.attack[p] < 1 || v.attack[p] > 5 ||
         v.defense[p] < 1 || v.defense[p] > 5) {
       return false;
     }
   }
-  if (v.time >= kTimeChoices || v.rounds < 1 || v.rounds > 5 || v.cutscenes > 1) {
+  if (v.time >= kTimeChoices || v.rounds < 1 || v.rounds > 5 || v.cutscenes > 1 || v.netcode > 1) {
     return false;
   }
   *r = v;
@@ -188,12 +200,14 @@ std::string TimeText(uint8_t time) {
   return time < 4 ? std::to_string(kTimeValues[time]) : std::string("Infinite");
 }
 
+const char* NetcodeText(uint8_t netcode) { return netcode ? "Rollback" : "Classic"; }
+
 std::string DescribeRules(const Rules& r) {
   return fmt::format(
       "P1 health {} attack {} defense {} | P2 health {} attack {} defense {} | time {} | rounds "
-      "{} | cut-scenes {}",
+      "{} | cut-scenes {} | netcode {}",
       r.health[0], r.attack[0], r.defense[0], r.health[1], r.attack[1], r.defense[1],
-      TimeText(r.time), r.rounds, r.cutscenes ? "on" : "off");
+      TimeText(r.time), r.rounds, r.cutscenes ? "on" : "off", NetcodeText(r.netcode));
 }
 
 int64_t NowMs() {
@@ -302,6 +316,9 @@ struct State {
   // Host, rules agreed: changed rules (the game's own Change Session Rules)
   // still to be acknowledged by the guest.
   bool resend = false;
+  // Host: the menu was opened again between matches (online_rules_menu) - the
+  // guest still has the earlier rules and doesn't ask, so no "guest left" timeout.
+  bool reopened = false;
   // Both: what the game thread saw last.
   bool session = false;
   bool in_battle = false;
@@ -369,7 +386,9 @@ Rules HostDefaults(rex::memory::Memory* memory) {
     r.time = uint8_t(std::min<uint32_t>(LoadU32(memory, net + kNetTime), 4));
     r.rounds = uint8_t(std::min<uint32_t>(LoadU32(memory, net + kNetRounds), 4) + 1);
   }
+  if (const int t = REXCVAR_GET(online_rules_test_rounds); t >= 1 && t <= 5) r.rounds = uint8_t(t);
   r.cutscenes = REXCVAR_GET(online_rules_cutscenes) == "off" ? 0 : 1;
+  r.netcode = REXCVAR_GET(online_rules_netcode) == "classic" ? 0 : 1;
   return r;
 }
 
@@ -382,6 +401,7 @@ void SaveHostDefaults(const Rules& r, const std::filesystem::path& config_path) 
   rex::cvar::SetFlagByName("online_rules_guest_attack", std::to_string(r.attack[1]));
   rex::cvar::SetFlagByName("online_rules_guest_defense", std::to_string(r.defense[1]));
   rex::cvar::SetFlagByName("online_rules_cutscenes", r.cutscenes ? "on" : "off");
+  rex::cvar::SetFlagByName("online_rules_netcode", r.netcode ? "rollback" : "classic");
   if (!config_path.empty()) {
     rex::cvar::SaveConfig(config_path);
   }
@@ -415,6 +435,7 @@ bool BurstLimitOnlineRulesOnSide(uint8_t kind, const uint8_t* body, size_t size)
       s.contact_ms = NowMs();
       if (nonce != s.host_nonce) {
         // A new guest: the menu opens with the host's defaults.
+        s.reopened = false;
         s.host_nonce = nonce;
         s.guest_name = GetName(body + 6);
         s.editing = HostDefaults(memory);
@@ -467,6 +488,7 @@ bool BurstLimitOnlineRulesOnSide(uint8_t kind, const uint8_t* body, size_t size)
       s.done_ms = NowMs();
       s.contact_ms = s.done_ms;
       s.write_room = true;
+      s.reopened = false;
       REXLOG_WARN("[OnlineRules] host: {} has the rules: {}", s.guest_name,
                   DescribeRules(s.sent));
       return true;
@@ -531,7 +553,7 @@ void BurstLimitOnlineRulesFrame(rex::memory::Memory* memory) {
     return;
   }
   if (side == 0 && (s.host == HostPhase::kChoosing || s.host == HostPhase::kSending) &&
-      now - s.contact_ms > 3000) {
+      !s.reopened && now - s.contact_ms > 3000) {
     // The guest left (or its link died) before it had the rules: the room
     // waits for the next guest, who gets the menu again.
     REXLOG_WARN("[OnlineRules] host: {} left before the rules were agreed - menu closed",
@@ -666,12 +688,54 @@ void BurstLimitOnlineRulesBattleSetup() {
                          LoadU32(memory, e + kRequestAttack),
                          LoadU16(memory, e + kRequestDefense));
   }
-  REXLOG_WARN("[OnlineRules] battle set-up ({}): {}time {} rounds {} cut-scenes {} mode {}",
+  REXLOG_WARN("[OnlineRules] battle set-up ({}): {}time {} rounds {} cut-scenes {} mode {} | netcode {}",
               side == 0 ? "host" : "guest", check, LoadU16(memory, request + kRequestTime),
               LoadU16(memory, request + kRequestRounds),
               LoadU16(memory, request + kRequestCutscenes),
-              LoadU32(memory, request + kRequestMode));
+              LoadU32(memory, request + kRequestMode), NetcodeText(rules.netcode));
 }
+
+// burstlimit_netinput.cpp, at each match reset: the agreed rules' netcode in a
+// Player Match of the lobby (1 Rollback, 0 Classic). false = no rules agreed
+// (Quick Match, Ranked, LAN / VPN): the caller uses its default.
+bool BurstLimitOnlineRulesNetcode(int* netcode) {
+  rex::memory::Memory* memory = GuestMemory();
+  const int side = LocalSide(memory);
+  if (side < 0 || GameType(memory) != 1) {
+    return false;
+  }
+  std::lock_guard<std::mutex> lock(g_state.mutex);
+  if (side == 0 && g_state.host == HostPhase::kDone) {
+    *netcode = g_state.sent.netcode;
+    return true;
+  }
+  if (side == 1 && g_state.guest == GuestPhase::kHave) {
+    *netcode = g_state.received.netcode;
+    return true;
+  }
+  return false;
+}
+
+// online_rules_menu: the host's Room Rules menu again, between matches (the
+// rules agreed, no battle running) - what it confirms goes to the guest like
+// the first time and counts from the next match on (netcode included).
+namespace {
+void ReopenRulesMenu() {
+  std::lock_guard<std::mutex> lock(g_state.mutex);
+  if (g_state.side != 0 || g_state.host != HostPhase::kDone || g_state.in_battle) {
+    REXLOG_WARN("[OnlineRules] online_rules_menu: only the host of a room with agreed rules, between matches");
+    return;
+  }
+  g_state.editing = g_state.sent;
+  g_state.host = HostPhase::kChoosing;
+  g_state.reopened = true;
+  g_state.contact_ms = NowMs();
+  REXLOG_WARN("[OnlineRules] host: rules menu open again ({})", DescribeRules(g_state.editing));
+}
+}  // namespace
+REXCVAR_DEFINE_COMMAND(online_rules_menu, ReopenRulesMenu, "Debug",
+                       "Player Match host, between matches: open the Room Rules menu again (the next match uses "
+                       "what it confirms)");
 
 // Mid-asm hook at 0x8226D25C in sub_8226D250 (the Session Lobby's Battle
 // Rules box, View Battle Rules): r31 + 20 = rounds - 1, + 21 = time limit
@@ -733,8 +797,8 @@ constexpr ImU32 kHighlight = IM_COL32(255, 238, 150, 235);
 constexpr ImU32 kHighlightEnd = IM_COL32(255, 220, 110, 0);
 constexpr ImU32 kArrow = IM_COL32(250, 236, 200, 255);
 
-enum Row { kHealth, kAttack, kDefense, kTime, kRounds, kCutscenes };
-constexpr int kLeftRows = 6;
+enum Row { kHealth, kAttack, kDefense, kTime, kRounds, kCutscenes, kNetcode };
+constexpr int kLeftRows = 7;
 constexpr int kRightRows = 3;
 
 class RulesDialog final : public rex::ui::ImGuiDialog {
@@ -932,6 +996,7 @@ class RulesDialog final : public rex::ui::ImGuiDialog {
         case kTime: step(rules.time, 0, kTimeChoices - 1); break;
         case kRounds: step(rules.rounds, 1, 5); break;
         case kCutscenes: rules.cutscenes = delta > 0 ? 1 : 0; break;
+        case kNetcode: rules.netcode = rules.netcode ? 0 : 1; break;  // two values: either way flips
       }
     }
     bool confirm = false;
@@ -1028,7 +1093,7 @@ class RulesDialog final : public rex::ui::ImGuiDialog {
          kYellow);
     const int rows = p == 0 ? kLeftRows : kRightRows;
     static const char* kLabels[kLeftRows] = {"Health", "Attack", "Defense", "Time Limit",
-                                             "Rounds", "Opening/Ending Cut-Scene"};
+                                             "Rounds", "Opening/Ending Cut-Scene", "Netcode"};
     const float row_h = 48.0f * s;
     float y = min.y + header + 14.0f * s;
     const float label_size = 28.0f * s;
@@ -1053,16 +1118,19 @@ class RulesDialog final : public rex::ui::ImGuiDialog {
         case kAttack: Meter(dl, right, cy, s, rules.attack[p], 5); break;
         case kDefense: Meter(dl, right, cy, s, rules.defense[p], 5); break;
         default: {
-          std::string value = r == kTime ? TimeText(rules.time)
-                              : r == kRounds ? std::to_string(rules.rounds)
-                                             : (rules.cutscenes ? "ON" : "OFF");
+          std::string value = r == kTime    ? TimeText(rules.time)
+                              : r == kRounds  ? std::to_string(rules.rounds)
+                              : r == kNetcode ? (rules.netcode ? "ROLLBACK" : "CLASSIC")
+                                              : (rules.cutscenes ? "ON" : "OFF");
           const float vs = 30.0f * s;
           Text(dl, ImVec2(right - TextWidth(vs, value), cy - vs * 0.55f), vs, value, kWhite);
         }
       }
       if (selected) {
-        const float mw = r == kHealth ? 8 * 16.0f * s : r <= kDefense ? 5 * 16.0f * s
-                                                                       : 90.0f * s;
+        const float mw = r == kHealth   ? 8 * 16.0f * s
+                         : r <= kDefense ? 5 * 16.0f * s
+                         : r == kNetcode ? 150.0f * s
+                                         : 90.0f * s;
         Triangle(dl, ImVec2(right - mw - 14.0f * s, cy), 18.0f * s, 0, kArrow);
         Triangle(dl, ImVec2(right + 18.0f * s, cy), 18.0f * s, 1, kArrow);
       }
@@ -1127,7 +1195,8 @@ class RulesDialog final : public rex::ui::ImGuiDialog {
     const std::string guest_name = host ? g_state.guest_name : rex::net::online::PlayerName();
     if (editable) {
       title = "Room Rules";
-      subtitle = other + " joined. Choose the battle settings for this room.";
+      subtitle = g_state.reopened ? std::string("Change the battle settings for the next match.")
+                                  : other + " joined. Choose the battle settings for this room.";
     } else {
       title = "Room Rules";
       subtitle = host ? other + " got the battle settings." : "Chosen by the host, " + other + ".";
@@ -1139,10 +1208,10 @@ class RulesDialog final : public rex::ui::ImGuiDialog {
     Text(dl, ImVec2(ox + (1280.0f * s - TextWidth(ss, subtitle)) * 0.5f, oy + 128.0f * s), ss,
          subtitle, kWhite);
     const std::string left_footer = sending ? "Sending to " + guest_name + "..." : "";
-    Panel(dl, P(90, 180), P(630, 180 + 58 + 14 + 6 * 48 + 14 + 44), s,
+    Panel(dl, P(90, 168), P(630, 168 + 58 + 14 + kLeftRows * 48 + 14 + 44), s,
           "Player 1 Settings", host_name, rules, 0, editable && panel_ == 0, editable,
           left_footer, editable && !sending);
-    Panel(dl, P(670, 180), P(1190, 180 + 58 + 14 + 3 * 48 + 14 + 44), s,
+    Panel(dl, P(670, 168), P(1190, 168 + 58 + 14 + kRightRows * 48 + 14 + 44), s,
           "Player 2 Settings", guest_name, rules, 1, editable && panel_ == 1, editable, "",
           editable && !sending);
   }
@@ -1154,7 +1223,7 @@ class RulesDialog final : public rex::ui::ImGuiDialog {
     const ImVec2 d = io.DisplaySize;
     const float s = std::min(d.x / 1280.0f, d.y / 720.0f);
     const float ox = (d.x - 1280.0f * s) * 0.5f, oy = (d.y - 720.0f * s) * 0.5f;
-    const ImVec2 min(ox + 50.0f * s, oy + 440.0f * s), max(ox + 640.0f * s, oy + 628.0f * s);
+    const ImVec2 min(ox + 50.0f * s, oy + 410.0f * s), max(ox + 640.0f * s, oy + 640.0f * s);
     const float radius = 12.0f * s;
     dl->AddRectFilledMultiColor(ImVec2(min.x, min.y + radius), ImVec2(max.x, max.y - radius),
                                 kBodyTop, kBodyTop, kBodyBottom, kBodyBottom);
@@ -1188,6 +1257,9 @@ class RulesDialog final : public rex::ui::ImGuiDialog {
          fmt::format("Time Limit {}   Rounds {}   Cut-Scene {}", TimeText(rules.time),
                      rules.rounds, rules.cutscenes ? "ON" : "OFF"),
          kWhite);
+    y += 40.0f * s;
+    Text(dl, ImVec2(min.x + 20.0f * s, y), ls,
+         rules.netcode ? "Netcode ROLLBACK" : "Netcode CLASSIC (lockstep, Back + D-pad: delay)", kWhite);
   }
 
   void DrawWaiting(ImGuiIO& io) {

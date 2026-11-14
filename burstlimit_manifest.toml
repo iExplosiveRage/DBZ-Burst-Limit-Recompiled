@@ -830,3 +830,48 @@ registers = ["r30"]
 address = 0x82280260
 name = "BurstLimitSigninPad"
 registers = ["r3", "r4"]
+
+# Rollback research (branch rollback2): the frame's scheduler split into the update pass and the draw
+# pass while the rb2 script runs (src/burstlimit_rb2.cpp).
+[[entrypoint.midasm_hook]]
+address = 0x82219938
+name = "BurstLimitRb2Scheduler"
+jump_address_on_true = 0x82219940
+
+[[entrypoint.midasm_hook]]
+address = 0x822198B0
+name = "BurstLimitRb2FrameA"
+
+[[entrypoint.midasm_hook]]
+address = 0x8221994C
+name = "BurstLimitRb2FrameF"
+
+[[entrypoint.midasm_hook]]
+address = 0x820F2634
+name = "BurstLimitRb2WorkerJob"
+registers = ["r31"]
+
+# rollback3: the job pool worker loop itself (sub_820F05B8, loop head after the wait) is a frame thread
+# from its first pop on - not only once it has run a job (0x820F2634): before that its queue pops were
+# "foreign" writes, never rewound, while the queue count was (early job pool crash at lr 0x820F06FC).
+[[entrypoint.midasm_hook]]
+address = 0x820F05D8
+name = "BurstLimitRb2WorkerLoop"
+
+# rollback3: the render loop thread (sub_82219360: each turn 8210F810, 821295A0 = walks the scene / effects,
+# 82119D18) - parks here while a rollback rewind restores and resimulates (it reads and writes the effects pool)
+[[entrypoint.midasm_hook]]
+address = 0x822193B0
+name = "BurstLimitRb2RenderPark"
+
+# ... and is outside its scene walk from here (82119D18: frame pacing and present) to the next loop head
+[[entrypoint.midasm_hook]]
+address = 0x822193B8
+name = "BurstLimitRb2RenderSafe"
+
+# rollback3: the draw worker (sub_820EA188, the guest D3D work of each frame): rb2_draw_worker decides
+# whether its writes are frame state (8, as before) or foreign (2, kept live by a rewind)
+[[entrypoint.midasm_hook]]
+address = 0x820EA23C
+name = "BurstLimitRb2DrawWorker"
+registers = ["r27"]
