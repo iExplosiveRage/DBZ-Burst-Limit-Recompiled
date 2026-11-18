@@ -29,6 +29,9 @@ void BurstLimitButtonsSetup(const std::filesystem::path& game_data_root);
 // burstlimit_online.cpp
 void BurstLimitOnlineSetup();
 void BurstLimitOnlineConnectEarly();
+// burstlimit_rb2.cpp (v0.8.1): settings migration, 1 ms timer period
+void BurstLimitSettingsMigrate(const std::filesystem::path& config_path);
+void BurstLimitTimerPeriodSetup();
 // burstlimit_online_rules.cpp: the Player Match room rules menu (host) / panel (guest).
 std::unique_ptr<rex::ui::ImGuiDialog> BurstLimitCreateOnlineRules(
     rex::ui::ImGuiDrawer* drawer, rex::ui::ImmediateDrawer* immediate_drawer,
@@ -111,6 +114,9 @@ class BurstlimitApp : public rex::ReXApp {
     if (config.gpu_plugin.empty()) {
       config.gpu_plugin = "xenos";
     }
+    // v0.8.1: one-time settings migration (online_input_delay "4" -> "auto") and the 1 ms timer period.
+    BurstLimitSettingsMigrate(ExeDirectory() / L"burstlimit.toml");
+    BurstLimitTimerPeriodSetup();
     BurstLimitApplyPostEffectSettings();
     EarlySetup(game_data_root());
     // "Online" instead of "Xbox LIVE": the title art is made in the background.
@@ -801,17 +807,27 @@ class BurstlimitApp : public rex::ReXApp {
          {"4", "4 frames"},
          {"5", "5 frames"},
          {"6", "6 frames"},
+         {"7", "7 frames"},
          {"8", "8 frames"},
          {"off", "Game default"}},
-        "Online (lobby): how many frames your presses wait so both PCs stay in step. Lower "
-        "feels snappier; the fight only pauses when the ping is higher (2 frames ~ 25 ms one "
-        "way, 4 ~ 55 ms, 6 ~ 90 ms, 8 ~ 120 ms). The host's choice is used by both players. "
-        "Game default = the older Online input speed (Radmin / LAN)."));
+        "Online (lobby): how many frames your presses wait before they act. Auto is best: with "
+        "Rollback netcode the fight runs at 2 frames and hides the ping by predicting the other "
+        "player; with Classic netcode the delay follows the ping (2 frames ~ 25 ms one way, 4 ~ 55 ms, "
+        "6 ~ 90 ms, 8 ~ 120 ms). A fixed number is used as it is, in both netcodes. The host's choice "
+        "is used by both players. Game default = the older Online input speed (Radmin / LAN)."));
     online_section.items.push_back(toggle(
         "Change delay in a match", "online_live_delay",
-        "In a Classic-netcode lobby match either player can change the input delay for both: "
-        "Back + D-pad up / down, or F6 / F5 on the keyboard (2 to 8 frames). Off on either PC = "
-        "it stays as picked. Each new match starts at the room's delay again."));
+        "Classic netcode only: in a lobby match either player can change the input delay for both "
+        "while fighting: Back + D-pad up / down, or F6 / F5 on the keyboard (2 to 8 frames). Off on "
+        "either PC = it stays as picked. Each new match starts at the room's delay again. Rollback "
+        "matches pick their delay by themselves."));
+    online_section.items.push_back(choice(
+        "Connection display", "online_stats_overlay",
+        {{"ping", "Ping and delay"}, {"full", "Full"}, {"off", "Off"}},
+        "A small line in the bottom left corner of an online fight: the netcode in use, the ping to the "
+        "other player and the input delay in frames (white, yellow above 150 ms, red above 250 ms). Full "
+        "also shows how many frames the fight runs ahead of the other player's inputs (what rollback has "
+        "to predict). Useful when you report a slow or jumpy match."));
     Item& online = online_section.items.emplace_back(choice(
         "Online input speed", "online_tick_sleep",
         {{"0", "LAN"}, {"1", "Fast"}, {"2", "Normal"}, {"3", "Game default"}},

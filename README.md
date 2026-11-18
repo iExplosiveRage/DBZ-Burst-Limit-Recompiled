@@ -190,7 +190,8 @@ normal Windows program instead of inside an emulator.
   player's, and when their real input arrives with a different press, the game rewinds the last frames and plays
   them again with it - no waiting for the ping in the fight. Both PCs stay frame-for-frame identical (checked
   every frame). Player Match hosts can pick **Netcode: Rollback / Classic** in the Room Rules; Quick Match and
-  Ranked use Rollback. See [Rollback netcode](#rollback-netcode-beta---since-080).
+  Ranked use Rollback. See [Rollback netcode](#rollback-netcode-beta---since-080). 0.8.1: no slow motion when the
+  other player transforms, a steady 60 FPS, crash fixes, a ping / delay line in the corner of online fights.
 - **Smooth online fights** (`online_input_delay`): every frame's input is sent right away over a side channel
   and both PCs run it a fixed number of frames later (2-8, the host's choice), instead of the game's 3-frame
   packs - no slow motion while the ping stays under the delay. The guest takes the host's online settings, every
@@ -520,6 +521,7 @@ settings menu (F1). Any setting can also be passed on the command line, e.g. `--
 | `extra_stages` | `true` | The three Z Chronicles stages on the Versus / Training stage select (offline). |
 | `extra_characters` | `true` | Extra characters from mods (`slot.toml`): R2 on the Versus / Training character select shows them (online too, since 0.7.1, when both players have the same mods). |
 | `input_delay` | `reduced` | Offline fights: `reduced` = no extra delay, `original` = the game's own 3 frames. From the next fight; online uses `online_input_delay`. |
+| `rb2_fx_scene_fix` | `true` | Since 0.8.1: fixes a bug of the original game - after Cell's ultimate or an ultimate clash the stage vanished (black background) for the rest of the fight on the normal stages. Offline and online. |
 | `drama_pieces` | `true` | Drama Pieces during fights; `false` = none (opening / ending scenes stay). Online: the host's value is used by both. |
 | `ki_charge` | `false` | Hold L3 to charge Ki (Shin Budokai style). Online: the host's value is used by both. |
 | `ki_charge_rate` | `16` | Ki added per frame while charging (the gauge holds 3000). |
@@ -536,7 +538,8 @@ settings menu (F1). Any setting can also be passed on the command line, e.g. `--
 | `online_lobby_connect_early` | `true` | Lobby mode: connect to the lobby in the background as soon as the game starts and stay connected (since 0.7.2). |
 | `online_connect_wait_ms` | `6000` | How long a search or Create Match waits for a lobby connection that is still being made. |
 | `online_frame_rate_cap` | `true` | Online sessions run at 60 FPS whatever `frame_rate` is (both players the same speed). |
-| `online_input_delay` | `4` | Lobby matches: input delay in frames (`2`-`8`), or `off` for the game's own timing (`online_tick_sleep`). The host's value is used by both players. |
+| `online_input_delay` | `auto` | Lobby matches: `auto` (from the ping; rollback fights at 2 frames), input delay in frames (`2`-`8`), or `off` for the game's own timing (`online_tick_sleep`). The host's value is used by both players. 0.8.1 turns an old `"4"` (the default of 0.7.x) into `auto` once (`settings_epoch = 81` marks it done); a value given on the command line is never changed. |
+| `online_stats_overlay` | `ping` | Online fights: a small line in the bottom left corner with the netcode, the ping and the input delay (yellow above 150 ms, red above 250 ms); `full` also shows how many frames the fight runs ahead of the other player's inputs; `off` = none. F1 > ONLINE > Connection display. |
 | `online_live_delay` | `true` | Lobby matches: either player can change the input delay for both during the match (Back + D-pad up / down, or F6 / F5; `bind_online_delay_up`, `bind_online_delay_down`). Off on either PC = it stays as picked. |
 | `online_rules_host_health/attack/defense`, `online_rules_guest_health/attack/defense`, `online_rules_cutscenes` | `3` / `room` | Player Match rooms you host: the room rules you picked last (Health 1-8 bars, Attack and Defense 1-5, cut-scenes `room` / `on` / `off`), the menu's defaults for the next guest. |
 | `online_input_channel` | `true` | Lobby matches: send every frame's input right away (off = only the game's own 3-frame packs). |
@@ -638,6 +641,12 @@ may see a short jump of the other fighter at a high ping; your own inputs always
   `[OnlineRollback]` / `[OnlineDesync]`).
 - Rollback costs some CPU in online fights (a rewind replays up to a few frames at once); offline, the code that
   makes it possible costs a few percent.
+- **Since 0.8.1:** no more slow motion when a fighter transforms (at a very high ping, above ~200 ms, the fight can
+  still slow down for a moment then); the fight keeps 60 FPS while rollback works; fixes for crashes and frozen
+  screens in matches with transformations; a connection line in the corner of online fights (netcode, ping, delay;
+  `online_stats_overlay`); "Waiting for the other player..." when the fight has to wait for their input; the delay
+  keys in a rollback match tell you the automatic delay and the ping. If the game crashes, it writes
+  `burstlimit.log.hangraw.txt` next to the log - please send it with the log.
 
 ### Room rules (Player Match) - since 0.6.0
 When a guest joins your Player Match room, you (the host) get a **Room Rules** menu: each player's **Health**
@@ -725,8 +734,9 @@ mods/
 
 ## Known issues
 
-- **Rollback netcode is a beta (0.8.0)**: it has only been tested with two copies on one PC through simulated
-  ping, jitter and packet loss, not between two houses yet. If a match desyncs it ends with a notice; if rollback
+- **Rollback netcode is a beta (0.8.0, 0.8.1)**: it has mostly been tested with two copies on one PC through
+  simulated ping, jitter and packet loss. At a very high ping (above ~200 ms) a transformation can still slow the
+  fight down for a moment. If a match desyncs it ends with a notice; if rollback
   gives you trouble, pick **Netcode: Classic** in the Player Match Room Rules and please report it with both
   logs. The Room Rules menu only opens when a guest joins, so to switch the netcode between matches the guest
   leaves and joins again.

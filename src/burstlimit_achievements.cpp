@@ -62,6 +62,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <deque>
 #include <filesystem>
@@ -171,6 +172,11 @@ REXCVAR_DEFINE_STRING(achievement_sound_dump, "", "Debug",
 REXCVAR_DEFINE_BOOL(one_hit_kill, false, "Debug",
                     "Testing (offline): player 2 starts every fight with 1 HP, so one hit wins")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+// v0.8.1 round 6 (test harness): a short offline fight that reaches the results screen, for the single-instance
+// runs that look at the release of the fight's resources (plan_v81.md, the player crash).
+REXCVAR_DEFINE_STRING(quick_fight_rules, "", "Debug",
+                      "Testing (offline): \"hp1,hp2,seconds,rounds\" written into the battle request at the "
+                      "set-up (health in points, 1000 = one bar; 0 leaves a value alone), e.g. 800,800,45,1");
 
 namespace {
 
@@ -2766,7 +2772,27 @@ void BurstLimitAchievementsMenu(rex::ui::QuickMenuSection& section) {
 // Mid-asm hook path: called from BurstLimitOnlineRulesBattleSetup (0x8217AEB4,
 // the battle set-up sub_8217AEA8 before it reads the match request).
 void BurstLimitOneHitKillBattleSetup() {
-  if (!REXCVAR_GET(one_hit_kill) || rex::net::IsGameSessionOpen()) {
+  if (rex::net::IsGameSessionOpen()) {
+    return;
+  }
+  if (const std::string rules = REXCVAR_GET(quick_fight_rules); !rules.empty()) {  // test harness, offline only
+    rex::memory::Memory* memory = GuestMemory();
+    const uint32_t request = memory ? R32(memory, 0x841B5138) : 0;
+    unsigned hp1 = 0, hp2 = 0, seconds = 0, rounds = 0;
+    if (request && Readable(memory, request, 216) &&
+        std::sscanf(rules.c_str(), "%u,%u,%u,%u", &hp1, &hp2, &seconds, &rounds) >= 1) {
+      auto put16 = [&](uint32_t address, unsigned value) {
+        rex::memory::store_and_swap<uint16_t>(memory->TranslateVirtual<uint8_t*>(address), uint16_t(value));
+      };
+      if (hp1) { put16(request + 44, hp1); put16(request + 46, hp1); }
+      if (hp2) { put16(request + 0x50 + 44, hp2); put16(request + 0x50 + 46, hp2); }
+      if (seconds) put16(request + 206, std::min(seconds * 60u, 0xFFFEu));
+      if (rounds) put16(request + 208, std::min(rounds, 5u));
+      REXLOG_INFO("quick_fight_rules: health {} / {} time {} s rounds {} (0 = the game's value; mode {})", hp1, hp2,
+                  seconds, rounds, R32(memory, request + 196));
+    }
+  }
+  if (!REXCVAR_GET(one_hit_kill)) {
     return;
   }
   rex::memory::Memory* memory = GuestMemory();

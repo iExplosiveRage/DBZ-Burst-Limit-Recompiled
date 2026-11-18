@@ -109,12 +109,51 @@ REXCVAR_DEFINE_BOOL(online_desync_end, true, "Patches", "Online rollback: a conf
 REXCVAR_DEFINE_BOOL(online_rollback_consume_fix, true, "Patches", "Online rollback: the local word consumed on a live tick is always the command recorded and sent for that frame");
 REXCVAR_DEFINE_BOOL(online_rollback_cine_delay, true, "Patches", "Online rollback (phase delay): a cinematic in the fight longer than half a second runs with the ping's delay (it runs without rollback)");
 REXCVAR_DEFINE_INT32(online_rollback_ready_switch, 130, "Patches", "Online rollback (phase delay): ticks into READY? (180 long) when the host asks for the fight delay (60-150; was 90)");
+// v0.8.1 R25 (build 151): a rollback match changes its delay by itself 2-4 times per round (phase delay, cinematics);
+// the players can't act on those notices (and "Opponent: input delay a -> b" read like the other player's choice)
+REXCVAR_DEFINE_BOOL(online_rollback_delay_notices, false, "Online",
+                    "Online rollback: show a notice for every automatic input delay change (off: only Classic matches show them)");
 REXCVAR_DEFINE_BOOL(online_rollback_phase_delay, true, "Patches", "Online rollback: outside the fight (intros, READY?, KO / time-up scenes, round change, results) the match runs with an input delay that covers the ping, so those lockstep parts don't wait; back to the fight delay before FIGHT! (the host decides, both switch on the same tick)");
+// v0.8.1 R37 / R36a (build 136). The game's NETWORK THREAD (sub_8229F548 -> sub_8229DC60 -> sub_8229D8E8, its
+// packet sender) copies the last three local history entries into the local ring whenever it sends - at any time,
+// also between the tick hook's ForceRing and the consume a few instructions later. A resim tick packs its local
+// frame again with the pads of that moment, so the history can hold another command than the one recorded and
+// sent when the frame ran live. MEASURED r135_long (RTT 235): the guest's resim consumed 0 for its own frames
+// 4088 / 2020 while 4010.. / 2008.. had been sent (the host used the sent ones; the hashes stayed equal by luck),
+// and four times the frame-end check took the ring's word for the truth, changed an entry that was already sent
+// and sent it again ("recorded X, ring Y - corrected") - the other PC rewound 13 frames each time, and one of
+// them flipped 2008.. -> 0 -> 2008.. there because an older packet arrived after the newer one.
+// Now the entry recorded when the frame was first packed is the only truth for the local command: it is what
+// both PCs consume (the consume's output word is set to it in resimulated ticks too) and it never changes.
+REXCVAR_DEFINE_BOOL(online_rollback_consume_fix_resim, true, "Patches",
+                    "Online rollback: the local word consumed in a resimulated tick is also the command recorded and sent "
+                    "for that frame (off = builds up to 135: live ticks only)");
+REXCVAR_DEFINE_BOOL(online_rollback_frame_end_fix, false, "Patches",
+                    "Online rollback: at the end of a live frame a local entry that differs from its ring slot takes the "
+                    "ring's command and is sent again (on = builds up to 135; off: the sent command stays and the ring gets it)");
+// build 137: the same for the REMOTE player's word. The game's network thread also runs the game's own receiver
+// (sub_82298498 -> sub_8217E630): the other PC's game packets carry its last three history entries (after one of
+// its resims: pads of that moment) and are written into our ring at any time. (1) A tick that holds (no known
+// entry, no prediction allowed) consumed such a slot anyway, with no record to compare it with later ("consumed
+// without any check", on15); (2) a write between the hook and the consume replaces the word this PC chose.
+// Now a held tick takes the frame out of the slot, and after the consume the remote word is set to the entry
+// that was chosen (the confirmed one, else the prediction); a consume nobody chose is recorded as a prediction,
+// so the real entry is compared with it when it arrives.
+REXCVAR_DEFINE_BOOL(online_rollback_consume_fix_remote, true, "Patches",
+                    "Online rollback: the remote word consumed is the confirmed entry or this PC's prediction for that "
+                    "frame, and a held tick never consumes a ring slot written by the game's own packets (off = builds up to 136)");
+REXCVAR_DEFINE_BOOL(online_rollback_seq, true, "Patches",
+                    "Online rollback: input packets carry a sequence number and an entry from an older packet never "
+                    "replaces what a newer packet said about the same frame (off = builds up to 135)");
 REXCVAR_DEFINE_BOOL(online_record_first_pack, true, "Patches", "Online rollback: a local frame first packed in a resim (the live run held there) is recorded and sent as the game consumes it; a frame packed again keeps its first (sent) command");
 REXCVAR_DEFINE_BOOL(online_desync_block, true, "Patches", "Online rollback desync end: also drop the game's own datagrams to the peer so its session sees a lost connection and leaves (cleared when the session is deleted)");
+REXCVAR_DEFINE_STRING(online_stats_overlay, "ping", "Online",
+                      "Online fights: a small connection line in the bottom left corner - off, ping (netcode, ping, "
+                      "input delay) or full (also how many frames the fight runs ahead of the other player's inputs)");
+REXCVAR_DEFINE_BOOL(online_stats_overlay_test, false, "Debug", "Testing: the connection line is drawn all the time (offline too)");
 REXCVAR_DEFINE_BOOL(online_time_sync, true, "Patches", "Online rollback: the PC running ahead waits a tick now and then (time sync)");
 REXCVAR_DEFINE_BOOL(online_hash_log, false, "Debug", "Online: log every consumed frame's desync hash (diagnostics)");
-REXCVAR_DEFINE_BOOL(online_desync_dump, false, "Debug", "Online rollback diagnostics: keep the battle / player / fighter objects of the last 64 consumed frames and write them to <log_file>.desync.bin when a desync is found or reported");
+REXCVAR_DEFINE_BOOL(online_desync_dump, true, "Debug", "Online rollback diagnostics (on by default since v0.8.1: 28 KB copied per consumed frame): keep the battle / player / fighter objects of the last 64 consumed frames and write them to <log_file>.desync.bin when a desync is found or reported");
 REXCVAR_DEFINE_BOOL(online_hold_freeze, false, "Patches",
                     "Online: while the fight waits for the other player's input (short waits "
                     "only), also stop the effect and HUD timers.")
@@ -130,11 +169,14 @@ void BurstLimitOnlineDelayNotice(const std::string& text, double seconds);
 bool BurstLimitSlotsOnSide(uint8_t kind, const uint8_t* body, size_t size);
 // burstlimit_online.cpp: a line in the online notice area.
 void BurstLimitOnlineGameNotice(const std::string& text, double seconds);
+void BurstLimitOnlineAlert(const char* kind, const std::string& text);  // burstlimit_online.cpp (v0.8.1 R8)
 
 void BurstLimitRb2OnConsume(rex::memory::Memory* memory, int32_t frame);
 // Rollback engine (burstlimit_rb2.cpp, branch rollback2).
 bool BurstLimitRb2Active();
+void BurstLimitRb2NewMatch();  // burstlimit_rb2.cpp (R17)
 bool BurstLimitRb2InResim();
+std::string BurstLimitDiagPath(const char* exe_name, const char* suffix);  // burstlimit_rb2.cpp (review L5)
 void BurstLimitRb2NoteHostStore(uint32_t a, uint32_t n);
 int64_t BurstLimitRb2CurrentFrame();
 void BurstLimitRb2RequestRewind(int64_t engine_frame);
@@ -317,6 +359,7 @@ struct RemoteEntry {
   uint64_t command;
   uint32_t status_a;
   uint32_t status_b;
+  uint32_t seq = 0;  // the sender's packet number (0: a packet without the trailer = a build before 136)
 };
 
 struct Inbox {
@@ -374,11 +417,15 @@ void OnGameSide(uint8_t kind, const uint8_t* body, size_t size) {
     const uint16_t low = uint16_t(body[26] | (body[27] << 8));
     g_inbox.peer_effective = sender_frame + int16_t(uint16_t(low - uint16_t(sender_frame)));
   }
+  // build 136: four more bytes after the entries = the sender's packet number (older builds ignore them: their
+  // size check is "at least header + entries")
+  const size_t entries_end = kInputHeader + size_t(count) * kInputEntry;
+  const uint32_t seq = size >= entries_end + 4 ? GetU32(body + entries_end) : 0;
   if (g_inbox.entries.size() < 1024) {
     for (uint8_t i = 0; i < count; ++i) {
       const uint8_t* e = body + kInputHeader + size_t(i) * kInputEntry;
       g_inbox.entries.push_back(
-          {first + i, player, GetU64(e), GetU32(e + 8), GetU32(e + 12)});
+          {first + i, player, GetU64(e), GetU32(e + 8), GetU32(e + 12), seq});
     }
   }
   if ((flags & kFlagHash) && g_inbox.hashes.size() < 256) {
@@ -441,6 +488,9 @@ struct Match {
     bool settled = false;
   };
   std::array<InputEntry, 128> remote_known{};
+  std::array<uint32_t, 128> remote_seq{};  // the packet number that last set each remote_known entry (0: unknown)
+  uint64_t rb_stale_entries = 0, rb_consume_fixes_resim = 0, rb_frame_end_kept = 0, rb_consume_fixes_remote = 0,
+           rb_unchosen_consumes = 0, rb_foreign_slots = 0;
   std::array<Prediction, 128> predicted{};
   std::array<std::pair<int32_t, int64_t>, 128> consumed_at{};  // remote input frame -> engine frame that consumed it
   InputEntry newest_remote{};
@@ -528,6 +578,28 @@ int g_sync_guard_waits = 0, g_sync_guard_skips = 0, g_sync_guard_timeouts = 0;  
 Match g_match;
 // Copies the hooks read without the lock.
 std::atomic<int> g_delay{0};
+// v0.8.1 R25 (first part): what the corner line of an online fight shows; written by the tick hook, read by the UI
+std::atomic<int64_t> g_ov_tick_ms{0};
+std::atomic<int> g_ov_delay{0}, g_ov_ahead10{0};
+std::atomic<bool> g_ov_rollback{false};
+}  // namespace
+// The line and its colour level (0 white, 1 yellow, 2 red); false = nothing to draw. UI thread; no lock taken.
+bool BurstLimitOnlineOverlayLine(std::string* text, int* level) {
+  const std::string mode = REXCVAR_GET(online_stats_overlay);
+  const bool test = REXCVAR_GET(online_stats_overlay_test);
+  if ((mode == "off" || mode.empty()) && !test) return false;
+  const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+  const int64_t tick = g_ov_tick_ms.load(std::memory_order_relaxed);
+  if (!test && (!tick || now - tick > 1500)) return false;  // no online fight is ticking
+  const uint32_t rtt = test && !tick ? 61 : rex::net::online::PeerRttMs();
+  const bool rollback = test && !tick ? true : g_ov_rollback.load(std::memory_order_relaxed);
+  const int delay = test && !tick ? 2 : g_ov_delay.load(std::memory_order_relaxed);
+  *text = fmt::format("{}  ping {} ms  delay {}f", rollback ? "Rollback" : "Classic", rtt, delay);
+  if (rollback && (mode == "full" || test)) *text += fmt::format("  ahead {:.1f}f", double(g_ov_ahead10.load(std::memory_order_relaxed)) / 10.0);
+  *level = rtt > 250 ? 2 : rtt > 150 ? 1 : 0;
+  return true;
+}
+namespace {
 std::atomic<int> g_start_frame{3};
 std::atomic<int> g_start_delay{0};
 // The frame the coming consume takes when it isn't tick frame - delay.
@@ -665,9 +737,7 @@ void CaptureDump(Match& m, rex::memory::Memory* memory, int32_t frame) {
 void WriteDumps(Match& m, const char* why) {
   if (m.dumps_written || !REXCVAR_GET(online_desync_dump)) return;
   m.dumps_written = true;
-  std::string path = rex::cvar::GetFlagByName("log_file");
-  if (path.empty()) path = "online";
-  path += ".desync.bin";
+  const std::string path = BurstLimitDiagPath("online", ".desync.bin");  // review L5: next to the log / the exe
   FILE* f = std::fopen(path.c_str(), "wb");
   if (!f) return;
   int n = 0;
@@ -697,6 +767,7 @@ void CompareHash(Match& m, int32_t frame) {
   ++m.total.hash_bad;
   if (!m.desync_reported) {
     m.desync_reported = true;
+    BurstLimitOnlineAlert("desync", "the two games no longer match (found here)");
     WriteDumps(m, "found here");
     if (RollbackMatch())
       REXLOG_WARN("[OnlineDesync] rollback stops for the rest of this match (lockstep from here)");
@@ -784,7 +855,13 @@ void LiveDelayTick(Match& m, rex::memory::Memory* memory, uint32_t manager, int3
   g_live_active.store(m.live_peer, std::memory_order_relaxed);
   int steps = g_live_steps.exchange(0, std::memory_order_relaxed);
   int absolute = g_live_absolute.exchange(0, std::memory_order_relaxed);
-  if (m.rollback_match) steps = absolute = 0;  // rollback matches: no delay changes by hand
+  if (m.rollback_match && (steps || absolute)) {  // rollback matches: no delay changes by hand (R25: say so)
+    BurstLimitOnlineDelayNotice("Input delay is automatic with rollback (now " + std::to_string(m.delay) + " frames, ping " +
+                                    std::to_string(rex::net::online::PeerRttMs()) + " ms)",
+                                3.0);
+    steps = absolute = 0;
+  }
+  const bool delay_notices = !m.rollback_match || REXCVAR_GET(online_rollback_delay_notices);
 
   // The other PC's request (each one is repeated in all its packets).
   const int remote_player = m.local_player >= 0 ? 1 - m.local_player : -1;
@@ -795,9 +872,10 @@ void LiveDelayTick(Match& m, rex::memory::Memory* memory, uint32_t manager, int3
     REXLOG_WARN("[OnlineDelay] other player asks: delay {} from tick frame {} (we are at {}, "
                 "delay {}, rtt {} ms)",
                 peer_target, peer_effective, frame, m.delay, rex::net::online::PeerRttMs());
-    BurstLimitOnlineDelayNotice("Opponent: input delay " + std::to_string(m.delay) + " -> " +
-                                    std::to_string(peer_target),
-                                3.0);
+    if (delay_notices)
+      BurstLimitOnlineDelayNotice("Opponent: input delay " + std::to_string(m.delay) + " -> " +
+                                      std::to_string(peer_target),
+                                  3.0);
   }
 
   // The local presses.
@@ -937,7 +1015,7 @@ void LiveDelayTick(Match& m, rex::memory::Memory* memory, uint32_t manager, int3
     if (!m.press_active) {
       m.desired = FinalDelay(m);
     }
-    BurstLimitOnlineDelayNotice(DelayLine(m.delay), 3.0);
+    if (delay_notices) BurstLimitOnlineDelayNotice(DelayLine(m.delay), 3.0);
   }
 
   // What the consume delivers.
@@ -1052,7 +1130,8 @@ static void LiveDelayPads(rex::memory::Memory* memory, Match& m) {
   previous = down;
   back_ticks = back ? back_ticks + 1 : 0;
   if (back_ticks == 20 && !down && !m.press_active && m.live_peer) {
-    BurstLimitOnlineDelayNotice(DelayLine(m.delay) + "   Back + D-pad up / down changes it", 3.0);
+    BurstLimitOnlineDelayNotice(DelayLine(m.delay) + (m.rollback_match ? std::string("   automatic with rollback")
+                                                                      : std::string("   Back + D-pad up / down changes it")), 3.0);
   }
 }
 
@@ -1169,6 +1248,7 @@ void BurstLimitOnlineResetFrame(PPCRegister& r9) {
   // Offline: the input delay option, fixed for the whole fight.
   g_offline_reduced.store(!rex::net::IsGameSessionOpen() && REXCVAR_GET(input_delay) == "reduced");
   if (online) {
+    BurstLimitRb2NewMatch();  // v0.8.1 R17 (build 142): the engine's tracked-set check runs at this match's first tracked frame
     REXLOG_WARN("[OnlineInput] match reset: delay {} (first frame {}), input channel {}, "
                 "desync check {}",
                 delay ? std::to_string(delay) + " frames" : std::string("game (3 ticks)"), start,
@@ -1323,17 +1403,48 @@ void RepairLocalHoles(Match& m, rex::memory::Memory* memory, uint32_t manager, i
   }
 }
 
+// v0.8.1 R30 (the file gate of burstlimit_rb2.cpp): the newest input frame consumed with a prediction and the frontier
+// up to which every remote input is known. A prediction above the frontier is unsettled: it can still turn out
+// wrong and ask for a rewind to its frame.
+std::atomic<int32_t> g_rb_last_pred{-1}, g_rb_contig{-1};
+bool BurstLimitOnlineUnsettled() {
+  return g_rb_last_pred.load(std::memory_order_relaxed) > g_rb_contig.load(std::memory_order_relaxed);
+}
+// v0.8.1 R8: why the last remote input that was not there yet got no prediction (the fight then waits: a held tick).
+// Read by the hold lines of burstlimit_online.cpp ("[OnlineHold]").
+const char* BurstLimitRb2HoldReason();
+const char* g_net_hold_reason = "";
+// review L7: a Classic (lockstep) match has no rollback hold reasons - the last rollback match's one is not reported
+const char* BurstLimitOnlineHoldReason() { return RollbackMatch() ? g_net_hold_reason : ""; }
+// 0 = this PC is the host of the running rollback match, 1 = the guest, -1 = no rollback match (main thread; the
+// file gate's stagger of burstlimit_rb2.cpp asks from inside the consume, so no lock here)
+int BurstLimitOnlineLocalPlayer() { return (g_match.online && RollbackMatch()) ? g_match.local_player : -1; }
+
 // Rollback: a remote entry received (live frames only). A prediction consumed for its frame that
 // differs asks the engine to go back to the frame that consumed it.
-void RollbackReceivedLocked(Match& m, const RemoteEntry& e) {
+bool RollbackReceivedLocked(Match& m, const RemoteEntry& e) {
   InputEntry& known = m.remote_known[uint32_t(e.frame) % m.remote_known.size()];
+  uint32_t& known_seq = m.remote_seq[uint32_t(e.frame) % m.remote_seq.size()];
   if (known.frame != e.frame) {
     known.frame = e.frame;
     known.command = e.command;
     known.status_a = e.status_a;
     known.status_b = e.status_b;
+    known_seq = e.seq;
+  } else if (e.seq && known_seq && int32_t(e.seq - known_seq) < 0 && REXCVAR_GET(online_rollback_seq)) {
+    // an older packet (a delayed copy, a reordered datagram) after a newer one: what it says about this frame is
+    // out of date. Before build 136 it was taken as a correction: the entry flipped back to the old value and
+    // stayed there if no later packet carried the frame again (r135_long, frame 1631: 2008.. -> 0 -> 2008..).
+    if (known.command != e.command || known.status_a != e.status_a || known.status_b != e.status_b) {
+      ++m.rb_stale_entries;
+      if (m.rb_stale_entries <= 40)
+        REXLOG_INFO("[OnlineRollback] remote entry of frame {} from an older packet ignored: {:X}/{}/{} (packet {} after {}), kept {:X}/{}/{}",
+                    e.frame, e.command, e.status_a, e.status_b, e.seq, known_seq, known.command, known.status_a, known.status_b);
+    }
+    return false;
   } else if (known.command != e.command || known.status_a != e.status_a || known.status_b != e.status_b) {
     // the other PC corrected this frame's entry after one of its rollbacks
+    known_seq = e.seq;
     known.command = e.command;
     known.status_a = e.status_a;
     known.status_b = e.status_b;
@@ -1344,12 +1455,17 @@ void RollbackReceivedLocked(Match& m, const RemoteEntry& e) {
                   e.status_a, e.status_b, c.first == e.frame ? c.second : -1);
     if (c.first == e.frame) BurstLimitRb2RequestRewind(c.second);
   }
+  if (e.seq && int32_t(e.seq - known_seq) > 0) known_seq = e.seq;
   if (e.frame > m.newest_remote.frame) m.newest_remote = known;
   // the contiguous frontier: every remote frame up to it is known (a lost one keeps it back until it is resent)
   // (re)started when it is far off: the first entry of a fight - remote_known is only filled while the engine runs, so
   // the last fight's frontier is stale after a round change (64: the sender can't run that far past a gap)
-  if (m.remote_contig < 0 || e.frame > m.remote_contig + 64 || e.frame < m.remote_contig - 100) m.remote_contig = e.frame - 1;
+  if (m.remote_contig < 0 || e.frame > m.remote_contig + 64 || e.frame < m.remote_contig - 100) {
+    m.remote_contig = e.frame - 1;
+    g_rb_last_pred.store(-1, std::memory_order_relaxed);  // a new fight's frame numbers
+  }
   while (m.remote_known[uint32_t(m.remote_contig + 1) % m.remote_known.size()].frame == m.remote_contig + 1) ++m.remote_contig;
+  g_rb_contig.store(m.remote_contig, std::memory_order_relaxed);
   Match::Prediction& p = m.predicted[uint32_t(e.frame) % m.predicted.size()];
   if (p.frame == e.frame && !p.settled) {
     p.settled = true;
@@ -1361,12 +1477,13 @@ void RollbackReceivedLocked(Match& m, const RemoteEntry& e) {
       BurstLimitRb2RequestRewind(p.engine_frame);
     }
   }
+  return true;
 }
 
 // Rollback: the remote input of the frame consumed now - the confirmed one, or (only while both
 // sides fight: same status words) a prediction = the newest confirmed input.
-void RollbackRemoteLocked(Match& m, rex::memory::Memory* memory, uint32_t manager, int32_t consume) {
-  if (m.local_player < 0 || consume < 0) return;
+bool RollbackRemoteChooseLocked(Match& m, rex::memory::Memory* memory, uint32_t manager, int32_t consume) {
+  if (m.local_player < 0 || consume < 0) return true;
   const int remote = 1 - m.local_player;
   const InputEntry& known = m.remote_known[uint32_t(consume) % m.remote_known.size()];
   m.consumed_at[uint32_t(consume) % m.consumed_at.size()] = {consume, BurstLimitRb2CurrentFrame()};
@@ -1382,7 +1499,7 @@ void RollbackRemoteLocked(Match& m, rex::memory::Memory* memory, uint32_t manage
                     LoadS32(memory, manager + uint32_t(remote) * kPlayerBlock + 776), LoadS32(memory, manager + kTickFrame));
       }
     }
-    return;
+    return true;
   }
   // Not the game's own packets: with rollback the other PC's game also packs frames during ITS resims, with
   // the pads of that moment, and its packets can put those into our ring for a frame our channel hasn't
@@ -1394,28 +1511,30 @@ void RollbackRemoteLocked(Match& m, rex::memory::Memory* memory, uint32_t manage
     const InputEntry& e = m.remote_known[uint32_t(k) % m.remote_known.size()];
     if (e.frame == k) { base = &e; break; }
   }
-  if (!base) { ++m.rb_no_base; return; }
+  if (!base) { ++m.rb_no_base; g_net_hold_reason = "no confirmed input to predict from"; return false; }
   // both in plain fighting: status A = 0 on both sides (A = 1 / 2 are round end and sync-event requests).
   // Status B is per player (MEASURED on13: 6 on one PC, 7 on the other for a whole round) - not compared.
   if (base->status_a != 0 || m.last_status_a != 0) {  // not both fighting: hold
     ++m.rb_status_diff;
     m.rb_status_sample = (uint64_t(base->status_a) << 48) ^ (uint64_t(base->status_b) << 32) ^ (uint64_t(m.last_status_a) << 16) ^ m.last_status_b;
-    return;
+    g_net_hold_reason = "status words (sync event / round flow)";
+    return false;
   }
-  if (!BurstLimitRb2PredictOk()) { ++m.rb_not_ready; return; }  // a rewind there would be refused: hold
+  if (!BurstLimitRb2PredictOk()) { ++m.rb_not_ready; g_net_hold_reason = BurstLimitRb2HoldReason(); return false; }  // a rewind there would be refused: hold
   // Safety net: after a confirmed desync no more predictions in this match (plain lockstep: no rollback on
   // top of a state that already differs; the match goes on and ends normally).
-  if (m.desync_reported) { ++m.rb_after_desync; return; }
+  if (m.desync_reported) { ++m.rb_after_desync; g_net_hold_reason = "after a desync (no more predictions)"; return false; }
   if (!BurstLimitRb2InResim() && REXCVAR_GET(online_time_sync) && m.pred_avg - m.remote_pred_avg >= 1.5f &&
       m.ts_tick - m.ts_last_hold >= 20) {
     m.ts_last_hold = m.ts_tick;  // running ahead: wait one tick for the other PC (time sync)
     ++m.ts_holds;
-    return;
+    g_net_hold_reason = "time sync (running ahead)";
+    return false;
   }
-  if (consume - base->frame > 8) { ++m.rb_too_old; return; }  // too far ahead: hold (the game's wait)
+  if (consume - base->frame > 8) { ++m.rb_too_old; g_net_hold_reason = "more than 8 frames ahead of the newest input"; return false; }  // too far ahead: hold (the game's wait)
   // ... also past the oldest frame still missing (rb_burst: frames lost in a burst arrived when a rewind to them was
   // deeper than the engine keeps; or never - then their predictions stayed): wait for the resend
-  if (m.remote_contig >= 0 && consume - m.remote_contig > 9 && consume - m.remote_contig < 64) { ++m.rb_gap_holds; return; }
+  if (m.remote_contig >= 0 && consume - m.remote_contig > 9 && consume - m.remote_contig < 64) { ++m.rb_gap_holds; g_net_hold_reason = "gap in the received inputs (waiting for a resend)"; return false; }
   ForceRing(memory, manager, remote, consume, base->command, base->status_a, base->status_b);
   Match::Prediction& p = m.predicted[uint32_t(consume) % m.predicted.size()];
   p.frame = consume;
@@ -1425,8 +1544,94 @@ void RollbackRemoteLocked(Match& m, rex::memory::Memory* memory, uint32_t manage
   p.engine_frame = BurstLimitRb2CurrentFrame();
   p.settled = false;
   ++m.rb_predicted;
+  if (consume > g_rb_last_pred.load(std::memory_order_relaxed)) g_rb_last_pred.store(consume, std::memory_order_relaxed);
+  return true;
 }
 
+// The tick's remote input: chosen (above), or the tick holds - then the slot must not be consumed. Before build 137
+// a slot the game's own receiver had filled (network thread, the other PC's game packets) or a prediction left
+// from before a rewind was consumed in a held tick, unknown to the prediction records.
+void RollbackRemoteLocked(Match& m, rex::memory::Memory* memory, uint32_t manager, int32_t consume) {
+  if (RollbackRemoteChooseLocked(m, memory, manager, consume)) return;
+  if (!REXCVAR_GET(online_rollback_consume_fix_remote) || m.local_player < 0 || consume < 0) return;
+  const uint32_t slot = manager + uint32_t(1 - m.local_player) * kPlayerBlock + (uint32_t(consume) % kRingSlots) * kSlotSize;
+  if (LoadS32(memory, slot + kSlotFrame) != consume) return;
+  StoreU32(memory, slot + kSlotFrame, 0xFFFFFFFFu);
+  ++m.rb_foreign_slots;
+  if (m.rb_foreign_slots <= 40)
+    REXLOG_INFO("[OnlineRollback] held tick: remote ring slot of frame {} (cmd {:X}, status {}/{}) was not chosen by this PC - taken out ({}{})",
+                consume, LoadU64(memory, slot), LoadU32(memory, slot + kSlotStatusA), LoadU32(memory, slot + kSlotStatusB),
+                g_net_hold_reason, BurstLimitRb2InResim() ? "; resim" : "");
+}
+
+// v0.8.1 R19 (build 138): received inputs were looked at only in the driver hook, after the engine's frame start -
+// a misprediction found in tick T was rewound at the frame start of T + 1 (the real match of 2026-11-14: all 153
+// rollbacks ran 16-18 ms after the detection). Called at the engine's frame start (live frames only), this takes
+// what has arrived since the last tick: the wrong prediction is rewound in this tick, one frame shallower, and the
+// corrected picture is shown a frame sooner. The entries stay in the inbox; the driver hook hands them over as
+// before (they are known by then: no second correction, no second rewind).
+REXCVAR_DEFINE_BOOL(online_rollback_peek, true, "Patches",
+                    "Online rollback: inputs that arrived since the last tick are examined when the frame starts, so a wrong "
+                    "prediction is rewound one tick earlier (off = builds up to 137)");
+static std::atomic<uint64_t> g_peek_calls{0}, g_peek_entries{0}, g_peek_rewinds{0};
+int64_t BurstLimitRb2LoopPeekRewind();
+void BurstLimitOnlinePeekInbox() {
+  if (!REXCVAR_GET(online_rollback_peek) || !RollbackMatch() || !BurstLimitRb2Active() || BurstLimitRb2InResim()) return;
+  std::lock_guard<std::mutex> lock(g_match_mutex);
+  Match& m = g_match;
+  if (!m.channel || !m.online || m.local_player < 0) return;
+  std::vector<RemoteEntry> peek;
+  {
+    std::lock_guard<std::mutex> inbox_lock(g_inbox.mutex);
+    if (g_inbox.entries.empty()) return;
+    peek = g_inbox.entries;
+  }
+  const int64_t before = BurstLimitRb2LoopPeekRewind();
+  ++g_peek_calls;
+  for (const RemoteEntry& e : peek) {
+    if (e.player == m.local_player || e.frame < 0) continue;
+    ++g_peek_entries;
+    RollbackReceivedLocked(m, e);
+  }
+  const int64_t after = BurstLimitRb2LoopPeekRewind();
+  if (after >= 0 && (before < 0 || after < before)) ++g_peek_rewinds;
+}
+// v0.8.1 R38: the game's network thread writes both input rings through sub_8217E630 (two callers only: its packet
+// sender sub_8229D8E8 at 0x8229DAC8 copies three local history entries, its receiver sub_82298498 at 0x82298664
+// the other PC's game packets; both ignore the result). While the rollback engine tracks, the rings are written by
+// this file's hooks (ForceRing: local frames from the first recorded entry, remote frames from the channel or a
+// prediction); builds 136 / 137 only repair what those foreign writes do. With the switch on they are dropped.
+// OFF by default: needs its acceptance run (T2: "consumed unchosen" 0, "slots taken out" 0, frames identical).
+REXCVAR_DEFINE_BOOL(online_rollback_own_rings, false, "Patches",
+                    "Online rollback (experimental): while the rollback engine tracks, the game's own network thread no "
+                    "longer writes the input rings (only the rollback input layer does)");
+static std::atomic<uint64_t> g_game_ring_writes_dropped{0}, g_game_ring_writes_kept{0};
+REX_EXTERN(__imp__sub_8217E630);
+extern "C" REX_FUNC(sub_8217E630) {
+  if (RollbackMatch() && BurstLimitRb2Active()) {
+    if (REXCVAR_GET(online_rollback_own_rings)) {
+      g_game_ring_writes_dropped.fetch_add(1, std::memory_order_relaxed);
+      ctx.r3.u64 = 0;
+      return;
+    }
+    g_game_ring_writes_kept.fetch_add(1, std::memory_order_relaxed);
+  }
+  __imp__sub_8217E630(ctx, base);
+}
+std::string BurstLimitOnlinePeekStats() {
+  return fmt::format("peek at the frame start: {} calls with inputs, {} entries, {} rewinds asked a tick earlier | the game's own ring "
+                     "writes while tracking: {} made, {} dropped (own rings)", g_peek_calls.load(),
+                     g_peek_entries.load(), g_peek_rewinds.load(), g_game_ring_writes_kept.load(), g_game_ring_writes_dropped.load());
+}
+
+// The pending flag of the event (0x84254730, counter 0x84254738: sub_822938E0 ends the session above 600 net ticks)
+// shares its 16-byte block with the counter the net tick writes, so a rewind can put net+1728 back to 0 and leave
+// the flag set: a ghost request (long2: "Connection with other player has been lost" 10 s later). No event is
+// open when net+1728 is 0, so the flag is cleared then.
+REXCVAR_DEFINE_BOOL(online_rollback_sync_reconcile, true, "Patches",
+                    "Online rollback: a pending synchronized-event flag left set by a rewind (no event open) is cleared "
+                    "instead of timing the session out");
+static std::atomic<uint32_t> g_early_sync_skipped{0}, g_sync_reconciled{0}, g_sync_counter_peak{0};
 // sub_8217E860 (online driver, state 3), right before the consume: this
 // tick's local frame goes into the local ring and out to the other PC, and
 // the frames the other PC sent go into its ring.
@@ -1449,6 +1654,24 @@ void BurstLimitOnlineBeforeConsume() {
   g_rb2_match.store(m.online && m.channel, std::memory_order_relaxed);
   const bool rollback = RollbackMatch() && BurstLimitRb2Active();
   const bool resim = rollback && BurstLimitRb2InResim();
+  if (RollbackMatch() && !resim && Readable(memory, 0x84255714, 4)) {  // v0.8.1 R5: ghost sync-event flag
+    const uint32_t net = LoadU32(memory, 0x84255714);
+    const uint32_t counter = LoadU32(memory, 0x84254738);
+    if (counter > g_sync_counter_peak.load(std::memory_order_relaxed)) g_sync_counter_peak.store(counter, std::memory_order_relaxed);
+    static int stale_ticks = 0;
+    if (net && Readable(memory, net + 1728, 4) && LoadU32(memory, net + 1728) == 0 && LoadU32(memory, 0x84254730) != 0) {
+      // two ticks in a row: never between the two stores of a request that is being made right now
+      if (++stale_ticks >= 2 && REXCVAR_GET(online_rollback_sync_reconcile)) {
+        rex::memory::store_and_swap<uint32_t>(memory->TranslateVirtual<uint8_t*>(0x84254730), 0);
+        rex::memory::store_and_swap<uint32_t>(memory->TranslateVirtual<uint8_t*>(0x84254738), 0);
+        const uint32_t n = ++g_sync_reconciled;
+        REXLOG_WARN("[OnlineInput] sync flag reconciled at frame {} (counter {}; no event open, {} so far)", frame, counter, n);
+        stale_ticks = 0;
+      }
+    } else {
+      stale_ticks = 0;
+    }
+  }
   if (!resim) {  // test (online_test_slow = <from tick>:<ticks>:<ms>): this PC's frame rate drops for a while
     static int slow_from = -2, slow_n = 0, slow_ms = 0;
     if (slow_from == -2) {
@@ -1606,6 +1829,7 @@ void BurstLimitOnlineBeforeConsume() {
     m.remote_pred_avg = g_inbox.remote_pred4 / 4.0f;
     if (g_inbox.remote_desync && !m.desync_reported && rollback) {
       m.desync_reported = true;
+      BurstLimitOnlineAlert("desync", "the two games no longer match (found by the other PC)");
       REXLOG_WARN("[OnlineDesync] the other PC found a desync at its frame {} - this match ends", g_inbox.sender_frame);
       WriteDumps(m, "reported by the other PC");
     }
@@ -1629,7 +1853,7 @@ void BurstLimitOnlineBeforeConsume() {
   const int32_t highest = frame + (live_window ? kLiveMaxDelay : delay) + 1;
   for (const RemoteEntry& e : entries) {
     if (rollback && m.local_player >= 0 && e.player != m.local_player && e.frame >= 0) {
-      RollbackReceivedLocked(m, e);
+      if (!RollbackReceivedLocked(m, e)) continue;  // from an older packet than the one this frame is known from
     }
     if (m.local_player < 0 || e.player == m.local_player || e.frame < lowest ||
         e.frame > highest) {
@@ -1657,6 +1881,11 @@ void BurstLimitOnlineBeforeConsume() {
       ++m.total.injected_known;
     }
   }
+  g_ov_tick_ms.store(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(),
+                     std::memory_order_relaxed);
+  g_ov_delay.store(m.delay ? m.delay : 3, std::memory_order_relaxed);
+  g_ov_rollback.store(m.rollback_match, std::memory_order_relaxed);
+  g_ov_ahead10.store(int(m.pred_avg * 10.0f + 0.5f), std::memory_order_relaxed);
   if (m.desync_check) {
     for (const auto& [hash_frame, hash] : hashes) {
       if (std::abs(hash_frame - frame) > 100) {
@@ -1692,11 +1921,12 @@ void BurstLimitOnlineBeforeConsume() {
     m.ts_tick = frame;
     RollbackRemoteLocked(m, memory, manager, consume);
     if (frame > 0 && frame % 600 == 0) {
-      REXLOG_INFO("[OnlineRollback] frame {}: predicted {} mispredicted {} too far ahead {} engine not ready {} no base {} status differs {} (remote A/B vs local A/B {:016X}) corrections local {} remote {} local entries recorded late {} ring fixes {} | time sync: ahead {:.2f} vs remote {:.2f}, holds {} (delay {}) | gap holds {} old-frame resends {} lost local frames {} first packs {} | sync requests: waited {} skipped {} timed out {}", frame,
+      REXLOG_INFO("[OnlineRollback] frame {}: predicted {} mispredicted {} too far ahead {} engine not ready {} no base {} status differs {} (remote A/B vs local A/B {:016X}) corrections local {} remote {} local entries recorded late {} ring fixes {} | time sync: ahead {:.2f} vs remote {:.2f}, holds {} (delay {}) | gap holds {} old-frame resends {} lost local frames {} first packs {} | sync requests: waited {} skipped {} timed out {} | consume fixes {} (resim {}) sent command kept at frame end {} entries from older packets ignored {} | remote word fixes {} consumed unchosen {} slots taken out in held ticks {} | {}", frame,
                   m.rb_predicted, m.rb_mispredicted, m.rb_too_old, m.rb_not_ready, m.rb_no_base, m.rb_status_diff, m.rb_status_sample,
                   m.rb_local_corrections, m.rb_remote_corrections, m.rb_local_late, m.rb_local_ring_fix, m.pred_avg,
                   m.remote_pred_avg, m.ts_holds, delay, m.rb_gap_holds, m.rb_old_resends, m.rb_hole_repairs, m.rb_first_packs,
-                  g_sync_guard_waits, g_sync_guard_skips, g_sync_guard_timeouts);
+                  g_sync_guard_waits, g_sync_guard_skips, g_sync_guard_timeouts, m.rb_consume_fixes, m.rb_consume_fixes_resim,
+                  m.rb_frame_end_kept, m.rb_stale_entries, m.rb_consume_fixes_remote, m.rb_unchosen_consumes, m.rb_foreign_slots, BurstLimitOnlinePeekStats());
     }
   }
 
@@ -1753,7 +1983,7 @@ void BurstLimitOnlineBeforeConsume() {
   while (from <= m.newest_local && m.local[uint32_t(from) % m.local.size()].frame != from) {
     ++from;
   }
-  std::array<uint8_t, kInputHeader + kMaxWindow * kInputEntry> packet{};
+  std::array<uint8_t, kInputHeader + kMaxWindow * kInputEntry + 4> packet{};
   packet[0] = kInputVersion;
   packet[1] = uint8_t(m.local_player);
   packet[3] = 0;
@@ -1794,8 +2024,13 @@ void BurstLimitOnlineBeforeConsume() {
     ++written;
   }
   packet[2] = uint8_t(written);
+  // build 136: the packet number, after the entries (never 0; one counter for the whole process, so a new match
+  // never starts below what the other PC has stored)
+  static uint32_t send_seq = 0;
+  if (++send_seq == 0) ++send_seq;
+  PutU32(&packet[kInputHeader + size_t(written) * kInputEntry], send_seq);
   if (rex::net::online::SendGameSide(kSideInput, packet.data(),
-                                     kInputHeader + size_t(written) * kInputEntry, 1)) {
+                                     kInputHeader + size_t(written) * kInputEntry + 4, 1)) {
     ++m.window.sent;
     ++m.total.sent;
     m.window.entries_sent += uint64_t(written);
@@ -1824,8 +2059,10 @@ void BurstLimitOnlineAfterConsume(PPCRegister& r3) {
   // resim the game can pack a local frame again after the tick hook (with the pads of that moment) - the forced ring
   // slot is overwritten before the consume (r105_s75: the guest consumed 2008.. for frame 1086, the host had 0 -> the
   // fights split, desync at 1739). The consume's output is corrected here, as live delay corrects it for its ticks.
-  if (RollbackMatch() && BurstLimitRb2Active() && !BurstLimitRb2InResim() && m.local_player >= 0 &&
-      REXCVAR_GET(online_rollback_consume_fix)) {
+  // v0.8.1 R37: in resimulated ticks too (the game's network thread can put a history word into the ring between
+  // the tick hook and the consume: r135_long, guest frames 4088 and 2020).
+  if (RollbackMatch() && BurstLimitRb2Active() && m.local_player >= 0 && REXCVAR_GET(online_rollback_consume_fix) &&
+      (!BurstLimitRb2InResim() || REXCVAR_GET(online_rollback_consume_fix_resim))) {
     const uint32_t mgr = LoadU32(memory, kInputManagerPointer);
     if (mgr && Readable(memory, mgr, 2 * kPlayerBlock + 64)) {
       const int32_t consumed = LoadS32(memory, mgr + kTickFrame) - (m.delay ? m.delay : 3);
@@ -1833,10 +2070,50 @@ void BurstLimitOnlineAfterConsume(PPCRegister& r3) {
       const uint32_t w = mgr + kConsumedWords + 8 * uint32_t(m.local_player);
       if (consumed >= 0 && le.frame == consumed && LoadU64(memory, w) != le.command) {
         ++m.rb_consume_fixes;
+        if (BurstLimitRb2InResim()) ++m.rb_consume_fixes_resim;
         if (m.rb_consume_fixes <= 40)
-          REXLOG_WARN("[OnlineRollback] local frame {}: the game consumed {:X}, the sent command {:X} is used", consumed,
-                      LoadU64(memory, w), le.command);
+          REXLOG_WARN("[OnlineRollback] local frame {}: the game consumed {:X}, the sent command {:X} is used{}", consumed,
+                      LoadU64(memory, w), le.command, BurstLimitRb2InResim() ? " (resim)" : "");
         StoreU64(memory, w, le.command);
+      }
+    }
+  }
+  // build 137: ... and the remote word is the entry this PC chose for the frame (see online_rollback_consume_fix_remote)
+  if (RollbackMatch() && BurstLimitRb2Active() && m.local_player >= 0 && REXCVAR_GET(online_rollback_consume_fix_remote)) {
+    const uint32_t mgr = LoadU32(memory, kInputManagerPointer);
+    if (mgr && Readable(memory, mgr, 2 * kPlayerBlock + 64)) {
+      const int32_t consumed = LoadS32(memory, mgr + kTickFrame) - (m.delay ? m.delay : 3);
+      const int remote = 1 - m.local_player;
+      const uint32_t w = mgr + kConsumedWords + 8 * uint32_t(remote);
+      if (consumed >= 0) {
+        const uint64_t used = LoadU64(memory, w);
+        const InputEntry& rk = m.remote_known[uint32_t(consumed) % m.remote_known.size()];
+        Match::Prediction& pr = m.predicted[uint32_t(consumed) % m.predicted.size()];
+        if (rk.frame == consumed || pr.frame == consumed) {
+          const uint64_t chosen = rk.frame == consumed ? rk.command : pr.command;
+          if (used != chosen) {
+            ++m.rb_consume_fixes_remote;
+            if (m.rb_consume_fixes_remote <= 40)
+              REXLOG_WARN("[OnlineRollback] remote frame {}: the game consumed {:X}, the {} command {:X} is used{}", consumed, used,
+                          rk.frame == consumed ? "confirmed" : "predicted", chosen, BurstLimitRb2InResim() ? " (resim)" : "");
+            StoreU64(memory, w, chosen);
+          }
+        } else {
+          // nobody chose this frame's remote input (a slot filled between the hold decision and the consume): from
+          // now on it is a prediction, compared with the real entry when that arrives
+          const uint32_t slot = mgr + uint32_t(remote) * kPlayerBlock + (uint32_t(consumed) % kRingSlots) * kSlotSize;
+          pr.frame = consumed;
+          pr.command = used;
+          pr.status_a = LoadU32(memory, slot + kSlotStatusA);
+          pr.status_b = LoadU32(memory, slot + kSlotStatusB);
+          pr.engine_frame = BurstLimitRb2CurrentFrame();
+          pr.settled = false;
+          if (consumed > g_rb_last_pred.load(std::memory_order_relaxed)) g_rb_last_pred.store(consumed, std::memory_order_relaxed);
+          ++m.rb_unchosen_consumes;
+          if (m.rb_unchosen_consumes <= 40)
+            REXLOG_WARN("[OnlineRollback] remote frame {} was consumed without a confirmed entry or a prediction: {:X}/{}/{} - recorded as a prediction{}",
+                        consumed, used, pr.status_a, pr.status_b, BurstLimitRb2InResim() ? " (resim)" : "");
+        }
       }
     }
   }
@@ -1961,7 +2238,7 @@ void BurstLimitOnlineAfterConsume(PPCRegister& r3) {
     }
     m.local_hashes[uint32_t(consumed) % m.local_hashes.size()] = record;
     m.last_hashed = consumed;
-    if (REXCVAR_GET(online_desync_dump)) CaptureDump(m, memory, consumed);
+    if (REXCVAR_GET(online_desync_dump) && m.rollback_match) CaptureDump(m, memory, consumed);  // review L5: rollback matches only
     const bool rb_on = RollbackMatch();
     if (REXCVAR_GET(online_hash_log)) {  // diagnostics: per frame, plus a wider local-only hash (small integers of
                                          // both player objects and fighters: HP / gauges) to find a divergence
@@ -2089,12 +2366,20 @@ void BurstLimitOnlineLiveFrameEnd() {
     const uint32_t slot = manager + uint32_t(m.local_player) * kPlayerBlock + (uint32_t(std::max(f, 0)) % kRingSlots) * kSlotSize;
     if (f >= 0 && e.frame == f && LoadS32(memory, slot + kSlotFrame) == f) {
       const uint64_t cmd = LoadU64(memory, slot);
-      if (cmd != e.command) {
+      if (cmd != e.command && REXCVAR_GET(online_rollback_frame_end_fix)) {
         ++m.rb_local_ring_fix;
         if (m.rb_local_ring_fix <= 100)
           REXLOG_INFO("[OnlineRollback] local frame {}: recorded {:X}, ring {:X} - corrected", f, e.command, cmd);
         e.command = cmd;
         if (m.resend_from < 0 || f < m.resend_from) m.resend_from = f;
+      } else if (cmd != e.command) {
+        // v0.8.1 R36a: the recorded entry was sent (it may be consumed on the other PC already); the ring's word is
+        // a later pack of the same frame (pads of that moment, put there by a resim tick or by the game's network
+        // thread). The sent command stays; the ring gets it back, and the consume takes it in any case.
+        ++m.rb_frame_end_kept;
+        if (m.rb_frame_end_kept <= 40)
+          REXLOG_INFO("[OnlineRollback] local frame {}: ring {:X} at the frame's end, the sent command {:X} stays", f, cmd, e.command);
+        ForceRing(memory, manager, m.local_player, f, e.command, e.status_a, e.status_b);
       }
     }
   }
@@ -2168,11 +2453,31 @@ REXCVAR_DEFINE_BOOL(online_rollback_sync_guard, true, "Patches",
                     "Online rollback: the game's synchronized-event requests go out only from frames whose predicted "
                     "inputs are confirmed (a request from a wrongly guessed frame made the other PC's game time out)");
 int64_t BurstLimitRb2LoopPeekRewind();
+// v0.8.1 R11: on a time-out the request used to go out anyway ("asked anyway") - from a frame that could still be
+// rewound: the ghost again. Now the wait is shorter (400 ms: under the hang watcher's limit) and on a time-out the
+// request is SKIPPED and the frame is rewound (the resimulated frame asks again, and waits again if its inputs are
+// still missing) - the same path as "one prediction was wrong".
+REXCVAR_DEFINE_INT32(online_rollback_sync_guard_timeout_ms, 400, "Patches",
+                     "Online rollback: how long a synchronized-event request waits for its frame's predictions (v0.8.0: 1500)");
+REXCVAR_DEFINE_BOOL(online_rollback_sync_guard_skip_on_timeout, true, "Patches",
+                    "Online rollback: a synchronized-event request whose frame is still unconfirmed after the wait is skipped and "
+                    "its frame rewound (off = v0.8.0: asked anyway)");
+REXCVAR_DEFINE_BOOL(online_rollback_sync_guard_skip_check, true, "Patches",
+                    "Online rollback (review L3): a timed-out synchronized-event request is skipped only if its frame's rewind can "
+                    "be taken (settled, logs kept); otherwise it is asked anyway (off = builds up to 152: skipped in any case)");
+bool BurstLimitRb2RewindPossible(int64_t engine_frame);
+// Round 6: the time-out path was never reached in a test (0 time-outs even with loss, bursts and 500 ms spikes),
+// so a test switch forces it: every N-th LIVE request that finds unconfirmed predictions "times out" at once.
+REXCVAR_DEFINE_INT32(online_rollback_sync_guard_test, 0, "Debug",
+                     "Online rollback test (R11): every N-th synchronized-event request of a live frame with unconfirmed "
+                     "predictions is treated as timed out at once (0 off; one PC or both)");
+static std::atomic<uint32_t> g_sync_guard_test_seen{0}, g_sync_guard_test_forced{0};
 // 1: the frame's predictions are all confirmed (or none / not a rollback match), 0: one was wrong, -1: timed out
 int SyncGuard(double* waited_ms) {
   *waited_ms = 0;
   if (!REXCVAR_GET(online_rollback_sync_guard) || !RollbackMatch() || !BurstLimitRb2Active()) return 1;
   const auto t0 = std::chrono::steady_clock::now();
+  bool first_pass = true;
   for (;;) {
     bool unsettled = false;
     const int64_t now = BurstLimitRb2CurrentFrame();
@@ -2195,27 +2500,185 @@ int SyncGuard(double* waited_ms) {
     *waited_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     if (to >= 0 && to <= now) return 0;
     if (!unsettled) return 1;
-    if (*waited_ms > 1500) return -1;
+    if (first_pass) {
+      first_pass = false;
+      if (const int every = REXCVAR_GET(online_rollback_sync_guard_test); every > 0 && !BurstLimitRb2InResim() &&
+          (g_sync_guard_test_seen++ % uint32_t(every)) == 0) {
+        REXLOG_WARN("[OnlineInput] TEST: sync-event guard time-out forced at engine frame {} ({} forced so far)", now,
+                    ++g_sync_guard_test_forced);
+        return -1;
+      }
+    }
+    if (*waited_ms > double(std::clamp(REXCVAR_GET(online_rollback_sync_guard_timeout_ms), 50, 5000))) return -1;
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
 }
+// v0.8.1 (plan_v81.md R5): the transformation (sub_82195AC0 state 0, call at 0x82195BC8) asks for the synchronized
+// event on its FIRST frame. The other PC ignores that request (message 15 subtype 1 is stored at net+1732, which
+// nothing reads), but status A = 1 then travels in every input frame for the 83-231 frames of the transformation,
+// and no input is predicted while a status A is non-zero: the whole fight ran in lockstep at delay 2 (47 % speed at
+// 150 ms, 40 % at 200 ms, and from ~230 ms the game's own 10 s watchdog ended the session). State 2 of the
+// transformation negotiates the event by itself (sub_82292328, 0 -> 1 -> 2 -> 0 in about 4 frames - the path the
+// second fighter of a double transformation always took). So in a rollback match the early request is not made.
+// Deterministic on both PCs: the return address and the match's netcode. Synced cvar (it changes the status words).
+REXCVAR_DEFINE_BOOL(online_rollback_skip_early_sync, true, "Patches",
+                    "Online rollback: a transformation does not ask for the synchronized event on its first frame "
+                    "(the fight ran in lockstep - slow motion - for the whole transformation); off = v0.8.0 behaviour");
 extern "C" REX_FUNC(sub_82292318) {
+  if (uint32_t(ctx.lr) == 0x82195BCCu && RollbackMatch() && REXCVAR_GET(online_rollback_skip_early_sync)) {
+    const uint32_t n = ++g_early_sync_skipped;
+    if (n <= 8 || (n & (n - 1)) == 0)
+      REXLOG_INFO("[OnlineInput] transformation: early sync request skipped (fighter r31={:X}, engine frame {}{}; {} so far)",
+                  ctx.r31.u32, BurstLimitRb2CurrentFrame(), BurstLimitRb2InResim() ? " resim" : "", n);
+    return;
+  }
   double waited = 0;
-  const int guard = SyncGuard(&waited);
+  int guard = SyncGuard(&waited);
   if (waited > 0.5) ++g_sync_guard_waits;
   if (guard == 0) ++g_sync_guard_skips;
   if (guard < 0) ++g_sync_guard_timeouts;
+  bool timeout_skip = false;
+  // R11: not "asked anyway" - but only when the rewind can be taken (review L3: a refused rewind lost the request)
+  if (guard < 0 && REXCVAR_GET(online_rollback_sync_guard_skip_on_timeout) &&
+      (!REXCVAR_GET(online_rollback_sync_guard_skip_check) || BurstLimitRb2RewindPossible(BurstLimitRb2CurrentFrame()))) {
+    timeout_skip = true;
+    BurstLimitRb2RequestRewind(BurstLimitRb2CurrentFrame());
+  }
+  if (guard < 0)
+    BurstLimitOnlineAlert("sync guard time-out", fmt::format("a synchronized event waited {:.0f} ms for its frame's predictions ({}) at engine "
+                                                             "frame {}", waited, timeout_skip ? "skipped, rewind requested" : "asked anyway",
+                                                             BurstLimitRb2CurrentFrame()));
   REXLOG_INFO("[OnlineInput] sync event call 82292318 r30={:X} r31={:X} lr={:08X}{}{}{}", ctx.r30.u32, ctx.r31.u32, uint32_t(ctx.lr),
               GuestChain(ctx, base), BurstLimitRb2InResim() ? " (resim)" : "",
               guard == 0 ? fmt::format(" - SKIPPED: a prediction of this frame was wrong (waited {:.1f} ms; the rewind asks again)", waited)
+              : timeout_skip ? fmt::format(" - SKIPPED after {:.0f} ms: predictions not confirmed, rewind requested (the frame asks again)", waited)
               : guard < 0 ? fmt::format(" - predictions not confirmed after {:.0f} ms, asked anyway", waited)
               : waited > 0.5 ? fmt::format(" - waited {:.1f} ms for this frame's predictions", waited) : std::string());
-  if (guard != 0) __imp__sub_82292318(ctx, base);
+  if (guard != 0 && !timeout_skip) __imp__sub_82292318(ctx, base);
 }
+void BurstLimitRb2NoteFxSync();
 extern "C" REX_FUNC(sub_82292328) {
+  if (uint32_t(ctx.lr) == 0x8214E5B4u) BurstLimitRb2NoteFxSync();
   REXLOG_INFO("[OnlineInput] sync event call 82292328 r3={:X} r4={:X} lr={:08X}{}{}", ctx.r3.u32, ctx.r4.u32, uint32_t(ctx.lr),
               GuestChain(ctx, base), BurstLimitRb2InResim() ? " (resim)" : "");
   __imp__sub_82292328(ctx, base);
+}
+// v0.8.1: the transformation's state 2 polls sub_82180BB0 ("the new form's resources are ready") from 0x82195C24;
+// on "ready" it asks for the synchronized event (status A = 1) - one log line per transformation with the polls
+// that answered "not ready".
+//
+// The ready gate (rb2_ready_gate). The answer follows the loader and the render thread, not the fight: a resimulated
+// frame saw "ready" where the same frame had seen "not ready" when it ran, the status words of frames already sent
+// changed ("local status of frame N corrected by a resim"), both PCs corrected each other with rewinds up to 24
+// deep, and the event ran on one PC only (MEASURED r125_res2: desync at input frame 999, p0 action 1262 on the
+// host, 1261 on the guest; 26 / 33 remote corrections against 0 in every good run). With the gate
+//   - a resimulated frame gets the answer the frame got when it ran live ("not ready" if it did not ask then);
+//   - the first "ready" of a transformation is given only in a live frame with no predicted input unsettled and
+//     no rewind pending; until then the answer is "not ready" (the game's own wait) and no prediction is made
+//     (BurstLimitRb2ReadyHold), so that frame is never rewound over. From it on the status words hold predictions.
+REXCVAR_DEFINE_INT32(rb2_ready_gap, 60, "Debug",
+                     "Rollback: engine frames without a \"resources ready\" poll of a fighter after which its next poll counts as a "
+                     "new transformation and the ready gate applies again (0 = builds up to 134: only a \"not ready\" poll closed it)");
+REXCVAR_DEFINE_BOOL(rb2_ready_gate, true, "Debug",
+                    "Rollback: the transformation's \"resources ready\" answer is the same in a resimulated frame as it was "
+                    "live, and its first \"ready\" waits for a frame no rewind can cross (off = build 125)");
+bool BurstLimitRb2Unsettled();
+void BurstLimitRb2ReadyHold();
+void BurstLimitRb2ReadyHoldEnd();
+namespace {
+struct ReadyRec { int64_t frame = -1; uint32_t who = 0; uint8_t ready = 0; };
+ReadyRec g_ready_rec[128];
+uint32_t g_ready_next = 0;
+int64_t g_ready_last_live = -1;
+uint32_t g_ready_open[2] = {0, 0};  // the fighters whose "ready" has been given
+int64_t g_ready_open_frame[2] = {-1000, -1000};  // ... and the last live engine frame in which each of them polled
+uint64_t g_ready_reclosed = 0;
+int g_ready_deferred_run = 0;
+uint64_t g_ready_deferred = 0, g_ready_forced = 0, g_ready_replayed = 0, g_ready_replay_changed = 0;
+}  // namespace
+std::string BurstLimitReadyGateStats() {
+  return fmt::format("ready gate: first \"ready\" deferred {} polls (forced {}), resim polls answered {} ({} differed from the live state), "
+                     "closed again for a new transformation {}",
+                     g_ready_deferred, g_ready_forced, g_ready_replayed, g_ready_replay_changed, g_ready_reclosed);
+}
+REX_EXTERN(__imp__sub_82180BB0);
+extern "C" REX_FUNC(sub_82180BB0) {
+  const uint32_t lr = uint32_t(ctx.lr), who = ctx.r3.u32;
+  __imp__sub_82180BB0(ctx, base);
+  if (lr != 0x82195C28u) return;
+  if (REXCVAR_GET(rb2_ready_gate) && BurstLimitRb2Active()) {
+    const int64_t frame = BurstLimitRb2CurrentFrame();
+    const bool real = (ctx.r3.u32 & 0xFF) != 0;
+    bool ready = real;
+    if (BurstLimitRb2InResim()) {
+      ready = false;
+      for (const ReadyRec& r : g_ready_rec) {
+        if (r.frame == frame && r.who == who) { ready = r.ready != 0; break; }
+      }
+      ++g_ready_replayed;
+      if (ready != real) ++g_ready_replay_changed;
+    } else {
+      if (frame < g_ready_last_live) {  // a new fight: the engine's frames start again
+        for (ReadyRec& r : g_ready_rec) r = ReadyRec{};
+        g_ready_open[0] = g_ready_open[1] = 0;
+        g_ready_open_frame[0] = g_ready_open_frame[1] = -1000;
+      }
+      g_ready_last_live = frame;
+      // v0.8.1 R36: "open" used to end only at a poll that answered "not ready". A fighter's NEXT transformation whose
+      // resources are ready at its first poll (Frieza / Cell: the next form is loaded already) then found the gate
+      // open from the one before, got "ready" in a frame with predictions unsettled, and the two PCs corrected each
+      // other's status words until the game's 10 s watchdog closed the session (r134_long, input frame 1563: "after 0
+      // not-ready polls", 222 event calls, 22 / 20 corrections). The state-2 poll runs every few engine frames while
+      // one transformation negotiates (gaps of up to 8 seen), and the next transformation of the same fighter is
+      // hundreds of frames away: a gap of more than rb2_ready_gap frames closes the gate again.
+      int slot = g_ready_open[0] == who ? 0 : g_ready_open[1] == who ? 1 : -1;
+      if (slot >= 0 && REXCVAR_GET(rb2_ready_gap) > 0 && frame - g_ready_open_frame[slot] > REXCVAR_GET(rb2_ready_gap)) {
+        g_ready_open[slot] = 0;
+        slot = -1;
+        const uint64_t n = ++g_ready_reclosed;
+        if (n <= 8 || (n & (n - 1)) == 0)
+          REXLOG_INFO("[OnlineInput] ready gate: closed again for object {:08X} (a new transformation, engine frame {}; {} so far)", who, frame, n);
+      }
+      const bool open = slot >= 0;
+      if (open) g_ready_open_frame[slot] = frame;
+      if (!real) {
+        if (g_ready_open[0] == who) g_ready_open[0] = 0;  // the next transformation of this fighter starts closed
+        if (g_ready_open[1] == who) g_ready_open[1] = 0;
+      } else if (!open) {
+        if (BurstLimitRb2Unsettled() && g_ready_deferred_run < 90) {
+          ready = false;
+          ++g_ready_deferred_run;
+          ++g_ready_deferred;
+          BurstLimitRb2ReadyHold();
+        } else {
+          if (g_ready_deferred_run >= 90) {
+            ++g_ready_forced;
+            REXLOG_WARN("[OnlineInput] ready gate: \"ready\" given after {} deferred polls with predictions still unsettled (engine frame {})",
+                        g_ready_deferred_run, frame);
+          }
+          g_ready_deferred_run = 0;
+          BurstLimitRb2ReadyHoldEnd();
+          const int s2 = g_ready_open[0] == 0 ? 0 : 1;
+          g_ready_open[s2] = who;
+          g_ready_open_frame[s2] = frame;
+        }
+      }
+      g_ready_rec[g_ready_next++ % 128] = ReadyRec{frame, who, uint8_t(ready ? 1 : 0)};
+    }
+    if (!ready) ctx.r3.u64 = 0;
+    else if (!real) ctx.r3.u64 = 1;
+  }
+  static uint32_t not_ready[2] = {0, 0}, last_who[2] = {0, 0};
+  const int slot = (last_who[0] == who || last_who[0] == 0) ? 0 : 1;
+  last_who[slot] = who;
+  if ((ctx.r3.u32 & 0xFF) == 0) {
+    ++not_ready[slot];
+    return;
+  }
+  if (not_ready[slot] || !BurstLimitRb2InResim())
+    REXLOG_INFO("[OnlineInput] transformation resources ready (object {:08X}) after {} not-ready polls, engine frame {}{}", who,
+                not_ready[slot], BurstLimitRb2CurrentFrame(), BurstLimitRb2InResim() ? " resim" : "");
+  not_ready[slot] = 0;
 }
 // Diagnostics (rollback3): the round flow's "resources ready" check before its sync step (sub_82140CF8 ->
 // sub_8213CD68: the round's sound loads, via the sound manager's sub_8210D3E8, and sub_82141998) - logged when

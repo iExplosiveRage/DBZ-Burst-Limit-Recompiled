@@ -3,7 +3,7 @@
 # Idempotent; run after codegen:  python -I patch_generated.py <generated/default>
 import pathlib, re, sys
 
-MARK = '// ---- rb2 write tracking v10b ----'
+MARK = '// ---- rb2 write tracking v10c ----'
 BLOCK = MARK + r'''
 extern "C" unsigned char rb2_dirty[0x100000];
 extern "C" thread_local unsigned char rb2_tbit;
@@ -36,7 +36,7 @@ struct rb2_cri_scope {
   ~rb2_cri_scope() { if (act < 0) return; --rb2_cri_depth; if (act == 1) rb2_cri_leave(a, *c); }
 };
 #define RB2_CRI_ENTRY(a, live) rb2_cri_scope rb2_cri_sc_((a), (live), ctx); if (rb2_cri_sc_.act == 2) return;
-#define RB2_D3D_ENTRY(a) if (rb2_d3d_watch && rb2_main) rb2_d3d_hit(a);
+#define RB2_D3D_ENTRY(a) if (rb2_d3d_watch && (rb2_main || rb2_d3d_watch > 1)) rb2_d3d_hit(a);
 extern "C" unsigned char rb2_track_on;  // set once a rollback engine starts in this process
 // v10 (2026-11-13): a store costs one global byte test and, only while tracking, a call - v9 inlined the whole
 // mark (+ the store watch) at every guest store, .text grew from 27 MB (v0.7.3) to 84 MB and rollback-off

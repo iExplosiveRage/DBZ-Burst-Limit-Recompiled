@@ -875,3 +875,49 @@ name = "BurstLimitRb2RenderSafe"
 address = 0x820EA23C
 name = "BurstLimitRb2DrawWorker"
 registers = ["r27"]
+
+# v0.8.1 (plan_v81.md R3): the seven consumers of the texture handle map (sub_820F37F8 on 0x8438D900) that call
+# through the lookup's result without a NULL check - a player's v0.8.0-beta crash was S1 (0x82105D18 reading guest
+# 0 on the draw worker). Each hook runs before the first dereference with r3 = the object; true = dead object, go
+# to the address that skips the use (src/burstlimit_texreg.cpp; bl_tex_guard, bl_tex_fault).
+[[entrypoint.midasm_hook]]
+address = 0x82105D18
+name = "BurstLimitTexGuardS1"
+registers = ["r3", "r30"]
+jump_address_on_true = 0x82105FC0
+
+[[entrypoint.midasm_hook]]
+address = 0x82103FF0
+name = "BurstLimitTexGuardS2"
+registers = ["r3", "r30"]
+jump_address_on_true = 0x8210427C
+
+[[entrypoint.midasm_hook]]
+address = 0x821060A4
+name = "BurstLimitTexGuardS3"
+registers = ["r3", "r30"]
+jump_address_on_true = 0x821060D0
+
+[[entrypoint.midasm_hook]]
+address = 0x821062A8
+name = "BurstLimitTexGuardS4"
+registers = ["r3", "r30"]
+jump_address_on_true = 0x821062D4
+
+[[entrypoint.midasm_hook]]
+address = 0x821014CC
+name = "BurstLimitTexGuardS5"
+registers = ["r3", "r31"]
+jump_address_on_true = 0x821014E0
+
+[[entrypoint.midasm_hook]]
+address = 0x820F419C
+name = "BurstLimitTexGuardS6"
+registers = ["r3", "r31"]
+jump_address_on_true = 0x820F41B4
+
+[[entrypoint.midasm_hook]]
+address = 0x820F3CE8
+name = "BurstLimitTexGuardS7"
+registers = ["r3"]
+jump_address_on_true = 0x820F3DE0
