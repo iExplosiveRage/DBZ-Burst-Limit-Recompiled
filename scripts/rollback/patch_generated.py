@@ -190,5 +190,19 @@ def main(d):
         if s2 != s:
             f.write_text(s2, encoding='utf-8')
     print('sound functions tagged', k)
+    # v0.8.2 (issue #33) diagnostics: the script interpreter's module-command dispatch (sub_8212AB78 at 0x8212AC94,
+    # r3 = (module << 12) | (command << 8) | 7, r31 = the thread, r30 = the context) is reported to
+    # BurstLimitScriptModuleCmd (burstlimit_rb2.cpp; returns at once unless rb2_script_log is on)
+    ns = 0
+    for f in sorted(d.glob('burstlimit_recomp.*.cpp')):
+        s = f.read_text(encoding='utf-8')
+        if 'DEFINE_REX_FUNC(sub_8212AB78) {' not in s or 'BurstLimitScriptModuleCmd(ctx, base);' in s:
+            continue
+        s = s.replace('DEFINE_REX_FUNC(sub_8212AB78) {', 'extern "C" void BurstLimitScriptModuleCmd(PPCContext& ctx, uint8_t* base);' + chr(10) + 'DEFINE_REX_FUNC(sub_8212AB78) {', 1)
+        s = s.replace('loc_8212AC94:' + chr(10), 'loc_8212AC94:' + chr(10) + chr(9) + 'BurstLimitScriptModuleCmd(ctx, base);' + chr(10), 1)
+        f.write_text(s, encoding='utf-8')
+        ns += 1
+    print('script dispatch hook', ns)
+
 
 main(sys.argv[1])

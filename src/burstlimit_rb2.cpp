@@ -184,6 +184,7 @@ std::string BurstLimitRb2LoopStats();
 // burstlimit_texreg.cpp (v0.8.1): texture registry audit, guard / command counters, the obituary rings
 bool BurstLimitTexAudit(PPCContext& ctx, uint8_t* base, const char* why);
 void BurstLimitTexRewindBegin(int64_t from, int64_t to);  // R13a: the resource command boundary of resimulated frames
+void BurstLimitStageRewind();  // v0.8.2: the test switch rb2_force_transition (burstlimit_stagechange.cpp) posts again in a new pass
 void BurstLimitRb2FileGateRewind(int64_t from, int64_t to);  // R30: a rewind over the frames [from, to)
 // v0.8.1 R39: the game heap (see "namespace heap")
 void BurstLimitRb2HeapAudit(rex::memory::Memory* m, const char* point, int64_t frame, int k);
@@ -3522,6 +3523,7 @@ bool TrkRewind(rex::memory::Memory* m, PPCContext& ctx, uint8_t* base, int n, bo
   double peak = 0, sum = 0;
   cri::g_now = now;
   BurstLimitTexRewindBegin(now - n, now);
+  BurstLimitStageRewind();
   for (int k = 0; k < n; ++k) {
     const int64_t f = now - n + k;
     g_cur_frame = f;
@@ -5202,9 +5204,11 @@ extern "C" void rb2_watch_hit(unsigned int a, unsigned long long v, int n, const
   std::string chain;  // the guest callers (back chain: each frame's saved LR at [its caller's sp - 8])
   if (PPCContext* c = rex::runtime::current_ppc_context(); c && g_mem && REXCVAR_GET(rb2_watch_chain)) {
     uint32_t sp = c->r1.u32;
-    for (int k = 0; k < 6 && sp >= 0x70000000u && sp < 0x80000000u && Committed(g_mem, sp, 4); ++k) {
+    for (int k = 0; k < 6 && sp >= 0x70000000u && sp < 0x80000000u && Committed(g_mem, sp, 4) &&
+                    HostReadable(g_mem->TranslateVirtual<const uint8_t*>(sp), 4); ++k) {
       const uint32_t prev = rex::memory::load_and_swap<uint32_t>(g_mem->TranslateVirtual<const uint8_t*>(sp));
-      if (prev <= sp || prev >= 0x80000000u || !Committed(g_mem, prev - 8, 4)) break;
+      if (prev <= sp || prev >= 0x80000000u || !Committed(g_mem, prev - 8, 4) ||
+          !HostReadable(g_mem->TranslateVirtual<const uint8_t*>(prev - 8), 4)) break;
       chain += fmt::format(" < {:08X}", rex::memory::load_and_swap<uint32_t>(g_mem->TranslateVirtual<const uint8_t*>(prev - 8)));
       sp = prev;
     }
@@ -6065,6 +6069,15 @@ bool TrackedPageInfo(uint32_t a, std::string& out);
 extern "C" REX_FUNC(sub_8214E528) {
   // also with rollback off: build 110 crashed there with the engine OFF (off110_2, Teen Gohan vs Piccolo, 30 s in)
   rex::memory::Memory* gm = g_mem_for_watch ? g_mem_for_watch : rex::Runtime::instance()->memory();
+  // v0.8.2 (issue #33): a stage transition with no stage to go to (stage transitions off, burstlimit_stagechange.cpp)
+  // loads stage -1: nothing to load (the table entry before index 0 is NULL - sub_8214C238 would read guest 0)
+  if (gm && ctx.r4.u32) {
+    const uint32_t prm = rex::memory::load_and_swap<uint32_t>(base + ctx.r4.u32 + 44);
+    if (prm && rex::memory::load_and_swap<uint32_t>(base + prm) == 0xFFFFFFFFu) {
+      ++g_fx_null_skips;
+      return;
+    }
+  }
   if (REXCVAR_GET(rb2_fx_guard) && gm) {
     auto u32 = [&](uint32_t a) { return rex::memory::load_and_swap<uint32_t>(base + a); };
     const uint32_t ctxo = ctx.r4.u32;
@@ -6184,28 +6197,33 @@ int EngineStateRaw(char* out, int cap) {
   return n;
 }
 
-// ---- v0.8.1 R21: one-time settings migration ----------------------------------------------------
+// ---- v0.8.1 R21 / v0.8.2: one-time settings migration ------------------------------------------
 // The Update button keeps the old burstlimit.toml. v0.7.3 and older wrote online_input_delay = "4" (the lockstep
 // default); with it every rollback fight runs at a fixed 4-frame delay instead of the 2 the rollback netcode picks.
-// Once per installation (settings_epoch < 81): "4" becomes "auto". A "4" chosen later stays.
-REXCVAR_DEFINE_INT32(settings_epoch, 0, "Internal", "Settings migration marker (81 = v0.8.1); not a setting");
+// v0.8.1 (settings_epoch < 81): "4" became "auto". v0.8.2 (settings_epoch < 82): ANY fixed number (2-8) becomes
+// "auto" once - a player's v0.8.1 log showed "delay 6 frames" in every match (100 ms of input lag with rollback; the
+// host's value is used by both PCs). A number chosen after the migration stays; "off" is never touched.
+REXCVAR_DEFINE_INT32(settings_epoch, 0, "Internal", "Settings migration marker (82 = v0.8.2); not a setting");
 REXCVAR_DECLARE(std::string, online_input_delay);
 void BurstLimitSettingsMigrate(const std::filesystem::path& config_path) {
-  if (REXCVAR_GET(settings_epoch) >= 81) return;
-  // review L4: only the toml's value is migrated - a "4" given on the command line (a shortcut, a launcher) wins over
-  // the toml for this start and must neither be overridden nor turned into a saved "auto"
+  const int32_t epoch = REXCVAR_GET(settings_epoch);
+  if (epoch >= 82) return;
+  // review L4: only the toml's value is migrated - a number given on the command line (a shortcut, a launcher) wins
+  // over the toml for this start and must neither be overridden nor turned into a saved "auto"
   const rex::cvar::Source delay_src = rex::cvar::GetFlagSource("online_input_delay");
   if (delay_src != rex::cvar::Source::kConfig && delay_src != rex::cvar::Source::kDefault) {
     REXLOG_INFO("[Settings] online_input_delay comes from the command line / environment: not migrated, settings_epoch not written");
     return;
   }
-  if (REXCVAR_GET(online_input_delay) == "4") {
+  const std::string delay = REXCVAR_GET(online_input_delay);
+  if (delay != "auto" && delay != "off") {
     rex::cvar::SetFlagByName("online_input_delay", "auto");
-    REXLOG_WARN("[Settings] online_input_delay 4 -> auto (the old lockstep default; rollback picks its delay from the ping)");
+    REXLOG_WARN("[Settings] online_input_delay {} -> auto (v0.8.2, once; settings_epoch was {}): a fixed delay is input lag with "
+                "rollback, auto picks it from the ping", delay, epoch);
   }
-  rex::cvar::SetFlagByName("settings_epoch", "81");
+  rex::cvar::SetFlagByName("settings_epoch", "82");
   if (!config_path.empty()) rex::cvar::SaveConfig(config_path);
-  REXLOG_INFO("[Settings] settings_epoch 81 written");
+  REXLOG_INFO("[Settings] settings_epoch 82 written");
 }
 
 // ---- v0.8.1 R12c: 1 ms timer period ----------------------------------------------------------------
@@ -6312,30 +6330,207 @@ extern "C" REX_FUNC(sub_8214B9B0) {
   FxTableLog("reset (8214B9B0)", ctx, 0);
   __imp__sub_8214B9B0(ctx, base);
 }
-// v0.8.1 R40: the stage vanishes after some effect-script cinematics (Cell's ultimate, an ultimate clash) - also
-// with the rollback engine never tracking (r158_n2). The fight's start sets the effect manager's scene with
-// sub_8214BDF0(scene, 1) from 0x8214C7F8: scene = 0 for the odd ("alternate") stage ids, 1 for the others
-// (sub_8214B150); the scene's effect pack is registered as resource id 30. The cinematic's script command
-// sub_8214E4C8 ends it with sub_8214BDF0(<script parameter>, 0) - parameter 0 - so on an even stage the manager
-// switches to scene 0, whose pack was never loaded: the registration gets no pack (r5 = 0x28, id 0), id 30 is gone
-// from the table (the R16b "effect instance of resource id 30" lookups) and the stage's scene is no longer drawn.
-// rb2_fx_scene_fix: a script reset to a scene other than the fight's own keeps the fight's scene. Deterministic
-// (the fight's scene is a function of the stage), the same on every PC, rollback on or off.
+// v0.8.2 (issue #33) diagnostics: the effect manager's two scenes. E = 0x841584E0: +96 the current scene, +100 + 4 * s
+// the stage loaded into scene s (sub_8214C238 writes it, -1 none), +112 + 40 * s 10 resource slots and +4452 + 64 * s
+// 16 more (each a resource object, +100 = 9 loaded; sub_8214ADF8 = "scene s ready"), +148 + 40 * s the scene's pack.
+namespace {
+constexpr uint32_t kFxManager = 0x841584E0u;
+rex::memory::Memory* GuestMem() { return rex::Runtime::instance() ? rex::Runtime::instance()->memory() : nullptr; }
+std::string FxSceneState(rex::memory::Memory* m) {
+  if (!m) return "";
+  std::string out = fmt::format("cur {}", int32_t(U32(m, kFxManager + 96)));
+  for (uint32_t s = 0; s < 2; ++s) {
+    int used = 0, loaded = 0;
+    auto count = [&](uint32_t slot) {
+      const uint32_t o = U32(m, slot);
+      if (!o) return;
+      ++used;
+      if (int32_t(U32(m, o + 100)) == 9) ++loaded;
+    };
+    for (uint32_t i = 0; i < 10; ++i) count(kFxManager + 112 + 40 * s + 4 * i);
+    for (uint32_t i = 0; i < 16; ++i) count(kFxManager + 4452 + 64 * s + 4 * i);
+    out += fmt::format(", scene {}: stage {} res {}/{} pack {:08X}", s, int32_t(U32(m, kFxManager + 100 + 4 * s)), loaded, used,
+                       U32(m, kFxManager + 148 + 40 * s));
+  }
+  return out;
+}
+}  // namespace
+REXCVAR_DEFINE_BOOL(rb2_scene_log, false, "Debug",
+                    "Diagnostics (issue #33): log the effect scripts' scene commands (load a stage into a scene, the paired stage, "
+                    "wait for a scene, switch scenes) with the effect manager's scene state");
+// the last distinct actions of each fighter (fighter + 1872), sampled by the sub_82186368 hook below (ground stages)
+namespace { std::array<std::array<uint32_t, 10>, 4> g_scene_actions{}; }  // 2/3: both fighters, sampled every battle tick
+void BurstLimitSceneNoteFighter(int32_t player, uint32_t action) {
+  if (player < 0 || player > 3) return;
+  auto& a = g_scene_actions[size_t(player)];
+  if (a[0] == action) return;
+  for (size_t i = a.size() - 1; i > 0; --i) a[i] = a[i - 1];
+  a[0] = action;
+}
+namespace {
+std::string SceneActions() {
+  std::string out;
+  for (int p = 2; p < 4; ++p) {
+    out += fmt::format(" P{}:", p - 1);
+    for (uint32_t v : g_scene_actions[size_t(p)]) out += fmt::format(" {:X}", v);
+  }
+  return out;
+}
+}  // namespace
+// issue #33 diagnostics: the stage's breakable objects (list at [0x8423CD50], next at +68). sub_82186368 (ground stages
+// only, every battle tick from sub_8217FA30): an object whose +32 * 0.15 exceeds +4 (flags +48 & 6 clear, callback +40)
+// gets callback(+44, 4, 0, ..) and flag 2.
+REX_EXTERN(__imp__sub_82186368);
+namespace { std::atomic<int> g_obj_dumps{0}; }
+extern "C" REX_FUNC(sub_82186368) {
+  rex::memory::Memory* m = GuestMem();
+  if (REXCVAR_GET(rb2_scene_log) && m) {
+    for (uint32_t p = 0; p < 2; ++p) {  // both fighters' actions (fighter = [[0x84239C10 + 4p] + 44], action +1872)
+      const uint32_t pl = U32(m, 0x84239C10u + 4 * p);
+      const uint32_t f = pl ? U32(m, pl + 44) : 0;
+      if (f) BurstLimitSceneNoteFighter(int32_t(p) + 2, U32(m, f + 1872));
+    }
+    const bool dump = g_obj_dumps.fetch_add(1) == 0;
+    uint32_t o = U32(m, 0x8423CD50u);
+    for (int n = 0; o && n < 64; ++n, o = U32(m, o + 68)) {
+      auto f = [&](uint32_t off) { uint32_t v = U32(m, o + off); float x; std::memcpy(&x, &v, 4); return x; };
+      const bool fire = (U32(m, o + 48) & 6) == 0 && U32(m, o + 40) != 0 && f(32) * 0.15f > f(4);
+      if (dump || fire) {
+        std::string w;
+        for (uint32_t k = 0; k < 72; k += 4) w += fmt::format(" {:08X}", U32(m, o + k));
+        REXLOG_WARN("[RB2] scene: stage object {} {:08X}{}:{} | engine frame {}{} | actions{}", n, o, fire ? " FIRES" : "", w,
+                    sync::g_cur_frame_for_hook.load(), g_in_resim ? " RESIM" : "", SceneActions());
+      }
+    }
+  }
+  __imp__sub_82186368(ctx, base);
+}
+// issue #33 diagnostics: every module command of the script interpreter (patch_generated.py inserts the call at
+// 0x8212AC94): per script context the last 48 (handler, script position, first params), dumped when that context
+// asks for the paired stage (sub_8214E670) - what the stage script checked before a transition.
+REXCVAR_DEFINE_BOOL(rb2_script_log, false, "Debug", "Diagnostics (issue #33): record the script interpreter's module commands per context");
+namespace {
+struct ScriptRec { uint32_t handler, pos, p0, p1, p2, poll; int64_t frame; };
+std::unordered_map<uint32_t, std::deque<ScriptRec>> g_script_recs;
+std::mutex g_script_mutex;
+}  // namespace
+extern "C" void BurstLimitScriptModuleCmd(PPCContext& ctx, uint8_t* base) {
+  (void)base;
+  if (!REXCVAR_GET(rb2_script_log)) return;
+  rex::memory::Memory* m = GuestMem();
+  if (!m) return;
+  const uint32_t r3 = ctx.r3.u32, thread = ctx.r31.u32, context = ctx.r30.u32;
+  const uint32_t script = U32(m, thread);
+  const uint32_t tables = script ? U32(m, script + 68) : 0;
+  const uint32_t tbl = tables ? U32(m, tables + 4 * (r3 >> 12)) : 0;
+  const uint32_t handler = tbl ? U32(m, tbl + 4 * ((r3 >> 8) & 0xF)) : 0;
+  const uint32_t prm = U32(m, context + 44);
+  ScriptRec r{handler, U32(m, ctx.r1.u32 + 80), prm ? U32(m, prm) : 0, prm ? U32(m, prm + 4) : 0, prm ? U32(m, prm + 8) : 0,
+              U32(m, thread + 16), sync::g_cur_frame_for_hook.load()};
+  std::lock_guard<std::mutex> lock(g_script_mutex);
+  auto& q = g_script_recs[context];
+  q.push_back(r);
+  if (q.size() > 48) q.pop_front();
+}
+namespace {
+void DumpScriptRecs(uint32_t context) {
+  std::lock_guard<std::mutex> lock(g_script_mutex);
+  auto it = g_script_recs.find(context);
+  if (it == g_script_recs.end()) return;
+  std::string out;
+  for (const ScriptRec& r : it->second)
+    out += fmt::format(" [{} {:08X} @{:08X} {:X} {:X} {:X} poll {:X}]", r.frame, r.handler, r.pos, r.p0, r.p1, r.p2, r.poll);
+  REXLOG_WARN("[RB2] scene: script context {:08X} last commands (frame handler @pos params):{}", context, out);
+}
+}  // namespace
+// issue #33 diagnostics: the battle cinematic starters (message handlers; each starts an effect-script task with
+// sub_8212AA48(0x13300000, ..) and sets a battle+574 bit: 82179998 bit 1, 82179AE8 bit 2, 82179C70 bit 8).
+REX_EXTERN(__imp__sub_82179998);
+REX_EXTERN(__imp__sub_82179AE8);
+REX_EXTERN(__imp__sub_82179C70);
+namespace {
+std::string CineChain(PPCContext& ctx, uint8_t* base) {
+  std::string out;
+  rex::memory::Memory* m = GuestMem();
+  uint32_t sp = ctx.r1.u32;
+  // v0.8.2: the guest heap calls the top of a stack committed while its host page is not readable (r11_v82_res:
+  // the message pump's outermost frame points at 0x70190000 - both PCs crashed here with rb2_scene_log on)
+  for (int k = 0; k < 6 && m && sp >= 0x70000000u && sp < 0x80000000u && Committed(m, sp, 8) && HostReadable(base + sp, 8); ++k) {
+    const uint32_t prev = rex::memory::load_and_swap<uint32_t>(base + sp);
+    if (prev <= sp || prev >= 0x80000000u || !Committed(m, prev - 8, 8) || !HostReadable(base + prev - 8, 8)) break;
+    out += fmt::format(" < {:08X}", rex::memory::load_and_swap<uint32_t>(base + prev - 8));
+    sp = prev;
+  }
+  return out;
+}
+void CineLog(const char* which, PPCContext& ctx, uint8_t* base) {
+  rex::memory::Memory* m = GuestMem();
+  if (!REXCVAR_GET(rb2_scene_log) || !m) return;
+  const uint32_t a = ctx.r3.u32;
+  std::string w;
+  if (a >= 0x40000000u && Committed(m, a, 32))
+    for (uint32_t k = 0; k < 32; k += 4) w += fmt::format(" {:08X}", U32(m, a + k));
+  REXLOG_WARN("[RB2] scene: cinematic starter {} lr {:08X}{} | arg {:08X}:{} | engine frame {}{} | actions{}", which, uint32_t(ctx.lr),
+              CineChain(ctx, base), a, w, sync::g_cur_frame_for_hook.load(), g_in_resim ? " RESIM" : "", SceneActions());
+}
+}  // namespace
+extern "C" REX_FUNC(sub_82179998) { CineLog("82179998", ctx, base); __imp__sub_82179998(ctx, base); }
+extern "C" REX_FUNC(sub_82179AE8) { CineLog("82179AE8", ctx, base); __imp__sub_82179AE8(ctx, base); }
+extern "C" REX_FUNC(sub_82179C70) { CineLog("82179C70", ctx, base); __imp__sub_82179C70(ctx, base); }
+REX_EXTERN(__imp__sub_8212AA48);
+extern "C" REX_FUNC(sub_8212AA48) {  // an effect-script task (r3 = priority, r4, r5)
+  if (REXCVAR_GET(rb2_scene_log) && (ctx.r3.u32 >> 20) == 0x133u) CineLog("task 8212AA48", ctx, base);
+  __imp__sub_8212AA48(ctx, base);
+}
+REX_EXTERN(__imp__sub_8214C238);
+REX_EXTERN(__imp__sub_8214E670);
+REX_EXTERN(__imp__sub_8214E560);
+extern "C" REX_FUNC(sub_8214C238) {  // load stage r4 into scene r3 (r5: 1 = the fight's own set-up)
+  const int32_t scene = ctx.r3.s32, stage = ctx.r4.s32, flag = int32_t(ctx.r5.u32 & 0xFF);
+  const uint32_t lr = uint32_t(ctx.lr);
+  __imp__sub_8214C238(ctx, base);
+  if (REXCVAR_GET(rb2_scene_log))
+    REXLOG_WARN("[RB2] scene: load stage {} into scene {} (flag {}, lr {:08X}) -> {} | engine frame {}{} | actions{}", stage, scene, flag, lr,
+                FxSceneState(GuestMem()), sync::g_cur_frame_for_hook.load(), g_in_resim ? " RESIM" : "", SceneActions());
+}
+extern "C" REX_FUNC(sub_8214E670) {  // script: the stage paired with the param's (-1 = the current one)
+  const uint32_t out = ctx.r4.u32;
+  if (REXCVAR_GET(rb2_script_log)) {
+    DumpScriptRecs(ctx.r4.u32);
+    if (rex::memory::Memory* m = GuestMem()) {  // the thread's poll function (+16, the last wait) and words
+      std::string w;
+      for (uint32_t k = 0; k < 32; k += 4) w += fmt::format(" {:08X}", U32(m, ctx.r3.u32 + k));
+      REXLOG_WARN("[RB2] scene: script thread {:08X}:{}", ctx.r3.u32, w);
+    }
+  }
+  __imp__sub_8214E670(ctx, base);
+  if (REXCVAR_GET(rb2_scene_log) && GuestMem())
+    REXLOG_WARN("[RB2] scene: paired stage -> {} | {} | engine frame {}{} | actions (newest first){}", int32_t(U32(GuestMem(), out)),
+                FxSceneState(GuestMem()), sync::g_cur_frame_for_hook.load(), g_in_resim ? " RESIM" : "", SceneActions());
+}
+extern "C" REX_FUNC(sub_8214E560) {  // script: wait for scene [r3+52] ready (+ the synchronized event when [r3+56])
+  const uint32_t cmd = ctx.r3.u32;
+  __imp__sub_8214E560(ctx, base);
+  if (REXCVAR_GET(rb2_scene_log) && ctx.r3.u32 == 1 && GuestMem())
+    REXLOG_WARN("[RB2] scene: wait for scene {} (sync {}) passed | {} | engine frame {}{}", int32_t(U32(GuestMem(), cmd + 52)),
+                U32(GuestMem(), cmd + 56), FxSceneState(GuestMem()), sync::g_cur_frame_for_hook.load(), g_in_resim ? " RESIM" : "");
+}
+// v0.8.1 R40 / v0.8.2 issue #33: the script command sub_8214E4C8 (stage transitions, burstlimit_stagechange.cpp)
+// switches the effect manager to another scene with sub_8214BDF0(scene, 0) from 0x8214E4E4. v0.8.1 kept the fight's
+// first scene on EVERY such switch - that also blocked the game's real stage transitions (the loop of issue #33).
+// Now only a switch to a scene with no stage loaded (the R40 case: the paired stage was -1) keeps the current
+// scene. Deterministic (guest state of the effect manager), the same with rollback on or off.
 REXCVAR_DEFINE_BOOL(rb2_fx_scene_fix, true, "Patches",
-                    "Effect-script cinematics (Cell's ultimate, ultimate clashes) end in the fight's own effect scene - without it the "
-                    "stage vanished for the rest of the fight on the normal (even) stages");
-namespace { int32_t g_fx_fight_scene = -1; std::atomic<int> g_fx_scene_fixes{0}; }
+                    "A stage-transition cinematic never switches to an empty scene (the stage vanished for the rest of "
+                    "the fight). v0.8.1 blocked every switch (the transition loop of issue #33); now only the empty one");
+int32_t BurstLimitStageSceneSwitch(int32_t target, bool safety_net);  // burstlimit_stagechange.cpp
 extern "C" REX_FUNC(sub_8214BDF0) {
   FxTableLog("reset (8214BDF0)", ctx, 0);
   const uint32_t lr = uint32_t(ctx.lr);
-  if (lr == 0x8214C7FCu) g_fx_fight_scene = ctx.r3.s32;  // the fight's start: its scene
-  if (lr == 0x8214E4E4u && REXCVAR_GET(rb2_fx_scene_fix) && g_fx_fight_scene >= 0 && ctx.r3.s32 != g_fx_fight_scene) {
-    const int n = ++g_fx_scene_fixes;
-    if (n <= 20 || (n & (n - 1)) == 0)
-      REXLOG_WARN("[RB2] effect scene: a cinematic's script switches to scene {} - the fight's scene {} is kept (engine frame {}{}; {} so far)",
-                  ctx.r3.s32, g_fx_fight_scene, sync::g_cur_frame_for_hook.load(), g_in_resim ? ", resim" : "", n);
-    ctx.r3.s64 = g_fx_fight_scene;
-  }
+  if (REXCVAR_GET(rb2_scene_log))
+    REXLOG_WARN("[RB2] scene: switch to scene {} (flag {}, lr {:08X}) | before: {} | engine frame {}{}", ctx.r3.s32, ctx.r4.u32 & 0xFF, lr,
+                FxSceneState(GuestMem()), sync::g_cur_frame_for_hook.load(), g_in_resim ? " RESIM" : "");
+  if (lr == 0x8214E4E4u) ctx.r3.s64 = BurstLimitStageSceneSwitch(ctx.r3.s32, REXCVAR_GET(rb2_fx_scene_fix));
   __imp__sub_8214BDF0(ctx, base);
 }
 extern "C" REX_FUNC(sub_8214DB30) {

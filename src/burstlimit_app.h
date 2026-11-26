@@ -686,6 +686,11 @@ class BurstlimitApp : public rex::ReXApp {
         "moments in Z Chronicles). Off = none, in every mode; the opening / ending scenes stay "
         "(the game's own cut-scenes rule decides those). From the next fight. Online, the "
         "host's setting is used by both players."));
+    game.items.push_back(toggle(
+        "Stage transitions", "stage_transitions",
+        "The short cinematic that sends the fight to the stage's aerial version after a big hit. "
+        "Off = the fight stays on its stage. Online, the host's setting is used (in Player Match "
+        "rooms: the Room Rules row)."));
     game.items.push_back(toggle("Vibration", "vibration", "Controller vibration."));
     game.items.push_back(choice(
         "Button icons", "button_icons",

@@ -208,11 +208,39 @@ void ParseFault() {
 const char* const kSiteName[kSites + 1] = {"?", "82105BE0 mesh", "82103EB8 mesh", "82105FD0 bind", "821061D8 bind",
                                           "821014A0 draw", "820F4160 group release", "820F3CB0 create"};
 
-// True: the object the site is about to call through is dead (NULL, or its first word is not a vtable of the image -
-// a freed 320-byte block has its free-list link there).
+// v0.8.2: the guard's own read of the object's first word must not fault either. A pointer that is not NULL but names
+// guest memory with no readable host page (a block whose pages were decommitted / protected after its release)
+// counts as dead. Readable 4 KB pages are verified once (VirtualQuery) and remembered in a bitmap; the bitmap is
+// forgotten every 2^18 guard passes (a few seconds of drawing), so a page released later is asked again. The guest's
+// own loads add 0x1000 at 0xE0000000 and up (the physical heap's host offset on Windows): the check reads the same
+// host bytes the guest code would.
+std::atomic<uint64_t> g_page_ok[(1u << 20) / 64];
+std::atomic<uint32_t> g_page_passes{0};
+std::atomic<uint64_t> g_page_unreadable{0};
+inline uint32_t HostOffset(uint32_t a) { return a >= 0xE0000000u ? 0x1000u : 0u; }
+bool PageReadable(const uint8_t* base, uint32_t a) {
+  if ((g_page_passes.fetch_add(1, std::memory_order_relaxed) & 0x3FFFFu) == 0x3FFFFu)
+    for (auto& w : g_page_ok) w.store(0, std::memory_order_relaxed);
+  const uint32_t page = a >> 12;
+  std::atomic<uint64_t>& w = g_page_ok[page >> 6];
+  const uint64_t bit = 1ull << (page & 63);
+  if (w.load(std::memory_order_relaxed) & bit) return true;
+  MEMORY_BASIC_INFORMATION mbi;
+  if (!VirtualQuery(base + (a & ~0xFFFu) + HostOffset(a), &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT ||
+      (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) || !mbi.Protect) {
+    g_page_unreadable.fetch_add(1, std::memory_order_relaxed);
+    return false;
+  }
+  w.fetch_or(bit, std::memory_order_relaxed);
+  return true;
+}
+
+// True: the object the site is about to call through is dead (NULL, not word-aligned, on a page the host cannot read,
+// or its first word is not a vtable of the image - a freed 320-byte block has its free-list link there).
 inline bool DeadObject(const uint8_t* base, uint32_t object) {
-  if (object < 0x10000u) return true;
-  return U32(base, object) - 0x82000000u >= 0x01000000u;
+  if (object < 0x10000u || (object & 3u)) return true;
+  if (!PageReadable(base, object)) return true;
+  return rex::memory::load_and_swap<uint32_t>(base + uint64_t(object) + HostOffset(object)) - 0x82000000u >= 0x01000000u;
 }
 
 bool Guard(int site, PPCRegister& r3, uint32_t item) {
@@ -242,7 +270,7 @@ bool Guard(int site, PPCRegister& r3, uint32_t item) {
                    w2 = item >= 0x10000u ? U32(base, item + 8) : 0;
     REXLOG_WARN("[TexGuard] texture skipped at S{} ({}): object {:08X} (first word {:08X}), item {:08X} = {:08X} {:08X} {:08X}, "
                 "engine frame {}{} ({} at this site)",
-                site, kSiteName[site], object, object >= 0x10000u ? U32(base, object) : 0, item, w0, w1, w2,
+                site, kSiteName[site], object, object >= 0x10000u && !(object & 3u) && PageReadable(base, object) ? rex::memory::load_and_swap<uint32_t>(base + uint64_t(object) + HostOffset(object)) : 0, item, w0, w1, w2,
                 BurstLimitRb2CurrentFrame(), BurstLimitRb2InResim() ? " resim" : "", count);
     static char buf[12000];
     static std::mutex mutex;
@@ -284,6 +312,7 @@ uint64_t BurstLimitTexGuardSkips() { return g_skips_total.load(std::memory_order
 std::string BurstLimitTexStats() {
   std::string s = "texture sites hits/skips:";
   for (int i = 1; i <= kSites; ++i) s += fmt::format(" S{} {}/{}", i, g_hits[i].load(), g_skips[i].load());
+  s += fmt::format(" (unreadable object pages {})", g_page_unreadable.load());
   s += " | resource commands live/resim by type:";
   for (int t = 0; t < 32; ++t) {
     const uint64_t l = g_cmd_count[0][t].load(), r = g_cmd_count[1][t].load();

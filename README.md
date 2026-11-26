@@ -192,6 +192,7 @@ normal Windows program instead of inside an emulator.
   every frame). Player Match hosts can pick **Netcode: Rollback / Classic** in the Room Rules; Quick Match and
   Ranked use Rollback. See [Rollback netcode](#rollback-netcode-beta---since-080). 0.8.1: no slow motion when the
   other player transforms, a steady 60 FPS, crash fixes, a ping / delay line in the corner of online fights.
+  0.8.2: stage transitions work again (no more repeating cinematic), an option / room rule to turn them off.
 - **Smooth online fights** (`online_input_delay`): every frame's input is sent right away over a side channel
   and both PCs run it a fixed number of frames later (2-8, the host's choice), instead of the game's 3-frame
   packs - no slow motion while the ping stays under the delay. The guest takes the host's online settings, every
@@ -521,7 +522,9 @@ settings menu (F1). Any setting can also be passed on the command line, e.g. `--
 | `extra_stages` | `true` | The three Z Chronicles stages on the Versus / Training stage select (offline). |
 | `extra_characters` | `true` | Extra characters from mods (`slot.toml`): R2 on the Versus / Training character select shows them (online too, since 0.7.1, when both players have the same mods). |
 | `input_delay` | `reduced` | Offline fights: `reduced` = no extra delay, `original` = the game's own 3 frames. From the next fight; online uses `online_input_delay`. |
-| `rb2_fx_scene_fix` | `true` | Since 0.8.1: fixes a bug of the original game - after Cell's ultimate or an ultimate clash the stage vanished (black background) for the rest of the fight on the normal stages. Offline and online. |
+| `rb2_fx_scene_fix` | `true` | Since 0.8.1: fixes a bug of the original game - after Cell's ultimate or an ultimate clash the stage vanished (black background) for the rest of the fight on the normal stages. Offline and online. Since 0.8.2 it only steps in when the cinematic's scene has no stage loaded (in 0.8.1 it also blocked the real stage transitions: the transition cinematic repeated). |
+| `stage_transitions` | `true` | Since 0.8.2: the short cinematic that sends the fight to the stage's aerial version after a big hit (Namek -> the space above Namek with Frieza's ship, ...). `false` = the fight stays on its stage (the hit is a normal hit). F1 -> GAME -> Stage transitions. Online the host's value is used (Player Match: the **Stage Transitions** room rule). |
+| `stage_transition_fix` | `true` | Since 0.8.2: a stage transition always has a stage to go to (the stage's own aerial / ground version when the save has none unlocked) and online it never depends on the two saves, so both PCs agree. |
 | `drama_pieces` | `true` | Drama Pieces during fights; `false` = none (opening / ending scenes stay). Online: the host's value is used by both. |
 | `ki_charge` | `false` | Hold L3 to charge Ki (Shin Budokai style). Online: the host's value is used by both. |
 | `ki_charge_rate` | `16` | Ki added per frame while charging (the gauge holds 3000). |
@@ -538,7 +541,7 @@ settings menu (F1). Any setting can also be passed on the command line, e.g. `--
 | `online_lobby_connect_early` | `true` | Lobby mode: connect to the lobby in the background as soon as the game starts and stay connected (since 0.7.2). |
 | `online_connect_wait_ms` | `6000` | How long a search or Create Match waits for a lobby connection that is still being made. |
 | `online_frame_rate_cap` | `true` | Online sessions run at 60 FPS whatever `frame_rate` is (both players the same speed). |
-| `online_input_delay` | `auto` | Lobby matches: `auto` (from the ping; rollback fights at 2 frames), input delay in frames (`2`-`8`), or `off` for the game's own timing (`online_tick_sleep`). The host's value is used by both players. 0.8.1 turns an old `"4"` (the default of 0.7.x) into `auto` once (`settings_epoch = 81` marks it done); a value given on the command line is never changed. |
+| `online_input_delay` | `auto` | Lobby matches: `auto` (from the ping; rollback fights at 2 frames), input delay in frames (`2`-`8`), or `off` for the game's own timing (`online_tick_sleep`). The host's value is used by both players. 0.8.1 turned an old `"4"` (the default of 0.7.x) into `auto` once; 0.8.2 turns any fixed number into `auto` once (`settings_epoch = 82` marks it done; with rollback a fixed delay is just input lag - you can set a number again afterwards); a value given on the command line is never changed. |
 | `online_stats_overlay` | `ping` | Online fights: a small line in the bottom left corner with the netcode, the ping and the input delay (yellow above 150 ms, red above 250 ms); `full` also shows how many frames the fight runs ahead of the other player's inputs; `off` = none. F1 > ONLINE > Connection display. |
 | `online_live_delay` | `true` | Lobby matches: either player can change the input delay for both during the match (Back + D-pad up / down, or F6 / F5; `bind_online_delay_up`, `bind_online_delay_down`). Off on either PC = it stays as picked. |
 | `online_rules_host_health/attack/defense`, `online_rules_guest_health/attack/defense`, `online_rules_cutscenes` | `3` / `room` | Player Match rooms you host: the room rules you picked last (Health 1-8 bars, Attack and Defense 1-5, cut-scenes `room` / `on` / `off`), the menu's defaults for the next guest. |
@@ -647,6 +650,10 @@ may see a short jump of the other fighter at a high ping; your own inputs always
   `online_stats_overlay`); "Waiting for the other player..." when the fight has to wait for their input; the delay
   keys in a rollback match tell you the automatic delay and the ping. If the game crashes, it writes
   `burstlimit.log.hangraw.txt` next to the log - please send it with the log.
+- **Since 0.8.2:** stage transitions work again online and offline (0.8.1 played the transition cinematic over and
+  over and left the fighters above the old stage, issue #33); both PCs always go to the same aerial stage; the
+  input delay is set back to **Auto** once (a fixed number from an older setup meant extra input lag with
+  rollback); a crash guard for released textures also covers bad (not only empty) texture pointers.
 
 ### Room rules (Player Match) - since 0.6.0
 When a guest joins your Player Match room, you (the host) get a **Room Rules** menu: each player's **Health**
@@ -660,6 +667,10 @@ Ranked Match and the older Radmin VPN / LAN way keep the game's rules and show n
 Since 0.8.0 the menu has a **Netcode** row: **Rollback** (the default) or **Classic** (the lockstep online of
 0.7.x, with the live input delay). It's the host's choice for both players, the guest sees it in the rules box,
 and the host's last pick is kept (`online_rules_netcode`).
+
+Since 0.8.2 there is a **Stage Transitions** row (ON / OFF, under Netcode): OFF keeps the fight on its stage (no
+transition cinematic). The guest's rules box shows it ("Stage Change"), and the host's last pick is kept
+(`online_rules_stage_transitions`). Quick Match and Ranked use the host's `stage_transitions` setting.
 
 ### Ranked Match and leaderboards - since 0.5.0
 - **Ranked:** Versus -> Online Battle -> **Ranked Match**: one player creates a match, the other searches (Quick
@@ -734,7 +745,7 @@ mods/
 
 ## Known issues
 
-- **Rollback netcode is a beta (0.8.0, 0.8.1)**: it has mostly been tested with two copies on one PC through
+- **Rollback netcode is a beta (0.8.0 - 0.8.2)**: it has mostly been tested with two copies on one PC through
   simulated ping, jitter and packet loss. At a very high ping (above ~200 ms) a transformation can still slow the
   fight down for a moment. If a match desyncs it ends with a notice; if rollback
   gives you trouble, pick **Netcode: Classic** in the Player Match Room Rules and please report it with both

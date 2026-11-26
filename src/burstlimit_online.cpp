@@ -321,10 +321,11 @@ void BurstLimitOnlineSetup() {
   // The Ki charge (burstlimit_kicharge.cpp) runs inside the battle, so its
   // settings must match too, and both players load the same start forms. A
   // Drama Piece (burstlimit_drama.cpp) changes the fight's timing: the host's
-  // drama_pieces is used by both.
+  // drama_pieces is used by both, and so is stage_transitions (issue #33; in a
+  // Player Match room the room rule decides, burstlimit_stagechange.cpp).
   rex::net::online::SetSyncedCvars({"online_tick_sleep", "online_fast_tick", "online_input_delay",
                                     "online_input_channel", "ki_charge", "ki_charge_rate",
-                                    "start_forms", "drama_pieces", "online_netcode",
+                                    "start_forms", "drama_pieces", "stage_transitions", "online_netcode",
                                     "online_rollback_phase_delay",
                                     "online_rollback_skip_early_sync"});
   BurstLimitNetInputSetup();

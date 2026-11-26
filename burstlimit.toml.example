@@ -44,8 +44,8 @@ online_name = ""
 # Classic netcode at the ping's delay. A number (2-8) is used as it is. The host's value is used by
 # both players. "off" = the game's own timing (online_tick_sleep).
 online_input_delay = "auto"
-# Settings migration marker (v0.8.1 turned an old "4" above into "auto" once). Not a setting.
-settings_epoch = 81
+# Settings migration marker (v0.8.1 turned an old "4" above into "auto" once, v0.8.2 any fixed number). Not a setting.
+settings_epoch = 82
 # Classic netcode: either player can change the delay during a lobby match: Back + D-pad up / down,
 # or F6 / F5. false on either PC = it stays as picked.
 online_live_delay = true
@@ -58,6 +58,9 @@ online_stats_overlay = "ping"
 # Game patches (see README).
 # Offline fights: "reduced" = no input delay, "original" = the game's own 3 frames (50 ms).
 input_delay = "reduced"
+# Stage transitions: the short cinematic that sends the fight to the stage's aerial version after a big
+# hit. false = the fight stays on its stage. Online the host's value is used (Player Match: the room rule).
+stage_transitions = true
 online_fast_tick = true
 # LAN / Radmin VPN input buffer (both players the same): 0 = LAN, 1 = internet, 2 = high ping, 3 = original.
 online_tick_sleep = 1

@@ -47,6 +47,7 @@ set(BURSTLIMIT_SOURCES
     src/burstlimit_signin.cpp
     src/burstlimit_slots.cpp
     src/burstlimit_stages.cpp
+    src/burstlimit_stagechange.cpp
     src/burstlimit_texreg.cpp
     src/burstlimit_widescreen.cpp
 )

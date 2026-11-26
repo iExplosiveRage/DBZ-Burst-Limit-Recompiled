@@ -4,9 +4,11 @@
 // When a guest joins a Player Match room, the host gets a rules menu in the
 // look of those panels: each player's Health (1-8 bars, 1000 HP each), Attack
 // and Defense (1-5; 3 = normal), the time limit (60 / 90 / 120 / 180 /
-// infinite), the rounds (1-5), the opening / ending cut-scenes and the
+// infinite), the rounds (1-5), the opening / ending cut-scenes, the
 // netcode (Rollback / Classic lockstep - burstlimit_netinput.cpp decides each
-// match's netcode from it when the match starts, on both PCs). The guest
+// match's netcode from it when the match starts, on both PCs) and the stage
+// transitions (issue #33: on / off, burstlimit_stagechange.cpp asks for it at
+// each transition, on both PCs). The guest
 // sees "the host is choosing" and then the chosen rules. The host's choice
 // goes to the guest over the peer link (side-channel kind 18) and the host's
 // menu stays open until the guest acknowledges it, so the host can't get to a
@@ -18,8 +20,8 @@
 //
 // Messages (kind 18, body[0] = version 1, body[1] = type):
 //   1 REQUEST guest -> host: +2 u32 nonce (new per session), +6 name (16)
-//   2 RULES   host -> guest: +2 u32 nonce, +6 seq, +7 rules (kRulesBytes = 10, the last byte the
-//             netcode: 1 rollback, 0 classic), +17 host name (16)
+//   2 RULES   host -> guest: +2 u32 nonce, +6 seq, +7 rules (kRulesBytes = 11: byte 9 the netcode,
+//             1 rollback, 0 classic; byte 10 the stage transitions, 1 on, 0 off), +18 host name (16)
 //   3 ACK     guest -> host: +2 u32 nonce, +6 seq
 //   4 MENU    host -> guest: +2 u32 nonce - the host's menu is open (every
 //             300 ms while it is; the guest's "choosing" panel shows only then)
@@ -87,6 +89,11 @@ REXCVAR_DEFINE_STRING(online_rules_netcode, "rollback", "Online",
                       "Player Match rooms you host: the netcode you last picked (rollback / classic "
                       "= the older lockstep online with live delay)")
     .allowed({"rollback", "classic"});
+REXCVAR_DECLARE(bool, stage_transitions);  // burstlimit_stagechange.cpp
+REXCVAR_DEFINE_STRING(online_rules_stage_transitions, "setting", "Online",
+                      "Player Match rooms you host: the stage transitions you last picked (setting = your "
+                      "stage_transitions setting)")
+    .allowed({"setting", "on", "off"});
 
 REXCVAR_DEFINE_INT32(online_rules_test_rounds, 0, "Debug",
                      "Test: the host's rules menu starts with this many rounds (1-5) instead of the room's, 0 off");
@@ -155,8 +162,9 @@ struct Rules {
   uint8_t rounds = 2;
   uint8_t cutscenes = 1;
   uint8_t netcode = 1;  // 1 Rollback, 0 Classic (lockstep)
+  uint8_t stage = 1;    // stage transitions: 1 on, 0 off (issue #33)
 };
-constexpr size_t kRulesBytes = 10;
+constexpr size_t kRulesBytes = 11;
 
 void PackRules(const Rules& r, uint8_t* out) {
   out[0] = r.health[0];
@@ -169,6 +177,7 @@ void PackRules(const Rules& r, uint8_t* out) {
   out[7] = r.rounds;
   out[8] = r.cutscenes;
   out[9] = r.netcode;
+  out[10] = r.stage;
 }
 
 bool UnpackRules(const uint8_t* in, Rules* r) {
@@ -183,13 +192,15 @@ bool UnpackRules(const uint8_t* in, Rules* r) {
   v.rounds = in[7];
   v.cutscenes = in[8];
   v.netcode = in[9];
+  v.stage = in[10];
   for (int p = 0; p < 2; ++p) {
     if (v.health[p] < 1 || v.health[p] > 8 || v.attack[p] < 1 || v.attack[p] > 5 ||
         v.defense[p] < 1 || v.defense[p] > 5) {
       return false;
     }
   }
-  if (v.time >= kTimeChoices || v.rounds < 1 || v.rounds > 5 || v.cutscenes > 1 || v.netcode > 1) {
+  if (v.time >= kTimeChoices || v.rounds < 1 || v.rounds > 5 || v.cutscenes > 1 || v.netcode > 1 ||
+      v.stage > 1) {
     return false;
   }
   *r = v;
@@ -205,9 +216,9 @@ const char* NetcodeText(uint8_t netcode) { return netcode ? "Rollback" : "Classi
 std::string DescribeRules(const Rules& r) {
   return fmt::format(
       "P1 health {} attack {} defense {} | P2 health {} attack {} defense {} | time {} | rounds "
-      "{} | cut-scenes {} | netcode {}",
+      "{} | cut-scenes {} | netcode {} | stage transitions {}",
       r.health[0], r.attack[0], r.defense[0], r.health[1], r.attack[1], r.defense[1],
-      TimeText(r.time), r.rounds, r.cutscenes ? "on" : "off", NetcodeText(r.netcode));
+      TimeText(r.time), r.rounds, r.cutscenes ? "on" : "off", NetcodeText(r.netcode), r.stage ? "on" : "off");
 }
 
 int64_t NowMs() {
@@ -389,6 +400,8 @@ Rules HostDefaults(rex::memory::Memory* memory) {
   if (const int t = REXCVAR_GET(online_rules_test_rounds); t >= 1 && t <= 5) r.rounds = uint8_t(t);
   r.cutscenes = REXCVAR_GET(online_rules_cutscenes) == "off" ? 0 : 1;
   r.netcode = REXCVAR_GET(online_rules_netcode) == "classic" ? 0 : 1;
+  const std::string st = REXCVAR_GET(online_rules_stage_transitions);
+  r.stage = st == "off" ? 0 : st == "on" ? 1 : (REXCVAR_GET(stage_transitions) ? 1 : 0);
   return r;
 }
 
@@ -402,6 +415,7 @@ void SaveHostDefaults(const Rules& r, const std::filesystem::path& config_path) 
   rex::cvar::SetFlagByName("online_rules_guest_defense", std::to_string(r.defense[1]));
   rex::cvar::SetFlagByName("online_rules_cutscenes", r.cutscenes ? "on" : "off");
   rex::cvar::SetFlagByName("online_rules_netcode", r.netcode ? "rollback" : "classic");
+  rex::cvar::SetFlagByName("online_rules_stage_transitions", r.stage ? "on" : "off");
   if (!config_path.empty()) {
     rex::cvar::SaveConfig(config_path);
   }
@@ -688,16 +702,35 @@ void BurstLimitOnlineRulesBattleSetup() {
                          LoadU32(memory, e + kRequestAttack),
                          LoadU16(memory, e + kRequestDefense));
   }
-  REXLOG_WARN("[OnlineRules] battle set-up ({}): {}time {} rounds {} cut-scenes {} mode {} | netcode {}",
+  REXLOG_WARN("[OnlineRules] battle set-up ({}): {}time {} rounds {} cut-scenes {} mode {} | netcode {} | stage transitions {}",
               side == 0 ? "host" : "guest", check, LoadU16(memory, request + kRequestTime),
               LoadU16(memory, request + kRequestRounds),
               LoadU16(memory, request + kRequestCutscenes),
-              LoadU32(memory, request + kRequestMode), NetcodeText(rules.netcode));
+              LoadU32(memory, request + kRequestMode), NetcodeText(rules.netcode), rules.stage ? "on" : "off");
 }
 
 // burstlimit_netinput.cpp, at each match reset: the agreed rules' netcode in a
 // Player Match of the lobby (1 Rollback, 0 Classic). false = no rules agreed
 // (Quick Match, Ranked, LAN / VPN): the caller uses its default.
+// issue #33: the agreed rules' stage transitions (1 on, 0 off); false = no rules agreed (not a Player Match room).
+bool BurstLimitOnlineRulesStageTransitions(int* on) {
+  rex::memory::Memory* memory = GuestMemory();
+  const int side = LocalSide(memory);
+  if (side < 0 || GameType(memory) != 1) {
+    return false;
+  }
+  std::lock_guard<std::mutex> lock(g_state.mutex);
+  if (side == 0 && g_state.host == HostPhase::kDone) {
+    *on = g_state.sent.stage;
+    return true;
+  }
+  if (side == 1 && g_state.guest == GuestPhase::kHave) {
+    *on = g_state.received.stage;
+    return true;
+  }
+  return false;
+}
+
 bool BurstLimitOnlineRulesNetcode(int* netcode) {
   rex::memory::Memory* memory = GuestMemory();
   const int side = LocalSide(memory);
@@ -797,8 +830,8 @@ constexpr ImU32 kHighlight = IM_COL32(255, 238, 150, 235);
 constexpr ImU32 kHighlightEnd = IM_COL32(255, 220, 110, 0);
 constexpr ImU32 kArrow = IM_COL32(250, 236, 200, 255);
 
-enum Row { kHealth, kAttack, kDefense, kTime, kRounds, kCutscenes, kNetcode };
-constexpr int kLeftRows = 7;
+enum Row { kHealth, kAttack, kDefense, kTime, kRounds, kCutscenes, kNetcode, kStage };
+constexpr int kLeftRows = 8;
 constexpr int kRightRows = 3;
 
 class RulesDialog final : public rex::ui::ImGuiDialog {
@@ -997,6 +1030,7 @@ class RulesDialog final : public rex::ui::ImGuiDialog {
         case kRounds: step(rules.rounds, 1, 5); break;
         case kCutscenes: rules.cutscenes = delta > 0 ? 1 : 0; break;
         case kNetcode: rules.netcode = rules.netcode ? 0 : 1; break;  // two values: either way flips
+        case kStage: rules.stage = delta > 0 ? 1 : 0; break;
       }
     }
     bool confirm = false;
@@ -1093,7 +1127,8 @@ class RulesDialog final : public rex::ui::ImGuiDialog {
          kYellow);
     const int rows = p == 0 ? kLeftRows : kRightRows;
     static const char* kLabels[kLeftRows] = {"Health", "Attack", "Defense", "Time Limit",
-                                             "Rounds", "Opening/Ending Cut-Scene", "Netcode"};
+                                             "Rounds", "Opening/Ending Cut-Scene", "Netcode",
+                                             "Stage Transitions"};
     const float row_h = 48.0f * s;
     float y = min.y + header + 14.0f * s;
     const float label_size = 28.0f * s;
@@ -1121,6 +1156,7 @@ class RulesDialog final : public rex::ui::ImGuiDialog {
           std::string value = r == kTime    ? TimeText(rules.time)
                               : r == kRounds  ? std::to_string(rules.rounds)
                               : r == kNetcode ? (rules.netcode ? "ROLLBACK" : "CLASSIC")
+                              : r == kStage   ? (rules.stage ? "ON" : "OFF")
                                               : (rules.cutscenes ? "ON" : "OFF");
           const float vs = 30.0f * s;
           Text(dl, ImVec2(right - TextWidth(vs, value), cy - vs * 0.55f), vs, value, kWhite);
@@ -1259,7 +1295,9 @@ class RulesDialog final : public rex::ui::ImGuiDialog {
          kWhite);
     y += 40.0f * s;
     Text(dl, ImVec2(min.x + 20.0f * s, y), ls,
-         rules.netcode ? "Netcode ROLLBACK" : "Netcode CLASSIC (lockstep, Back + D-pad: delay)", kWhite);
+         fmt::format("{}   Stage Change {}", rules.netcode ? "Netcode ROLLBACK" : "Netcode CLASSIC (Back + D-pad: delay)",
+                     rules.stage ? "ON" : "OFF"),
+         kWhite);
   }
 
   void DrawWaiting(ImGuiIO& io) {
